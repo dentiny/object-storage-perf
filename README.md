@@ -1,9 +1,9 @@
 # object-storage-perf
 
 A Rust and [Apache OpenDAL](https://opendal.apache.org/) benchmark suite for
-S3-compatible object storage. The benchmark workloads will be added in the next
-milestone; the current CLI configures storage and performs a read-only
-connectivity check.
+S3-compatible object storage. It runs 2 MiB range reads, 512 MiB multipart
+writes, and object stat requests, then prints a rough latency and throughput
+report.
 
 ## Configuration
 
@@ -21,19 +21,47 @@ export OSP_PREFIX=object-storage-perf
 Do not commit credentials. Environment variables are preferable to credential
 flags because command-line values can be visible in process listings.
 
-## Connectivity check
+## Run
 
-Build and list at most one entry from the benchmark prefix:
-
-```console
-cargo run --release -- check
-```
-
-If the credentials cannot list the bucket, check a known object instead:
+Run all three workloads:
 
 ```console
-cargo run --release -- check --object path/to/existing-object
+cargo run --release
 ```
 
-Run `cargo run -- --help` to see the equivalent command-line configuration
-flags.
+Each workload runs for 10 seconds with four concurrent logical operations by
+default. Tune concurrency and duration to find the backend limit:
+
+```console
+cargo run --release -- \
+  --concurrency 16 \
+  --duration-seconds 30 \
+  --multipart-concurrency 2
+```
+
+`--concurrency` controls simultaneous read, write, or stat operations.
+`--multipart-concurrency` controls simultaneous part requests inside each
+512 MiB upload, so the write phase can issue up to the product of those two
+settings in parallel.
+
+Every write operation uses a new object path. The suite also creates one
+512 MiB source object for read and stat. It attempts to delete all created
+objects after reporting; use `--keep-objects` to retain them. Credentials
+without delete permission can still run the benchmark, but cleanup will emit a
+warning.
+
+The measured phases use:
+
+- Object size: 512 MiB
+- Read size: 2 MiB, aligned within the source object
+- Multipart upload part size: 10 MiB, with a final 2 MiB part
+- Read throughput: successful bytes divided by measured wall time
+- Write throughput: successfully completed object bytes divided by measured
+  wall time
+- Stat throughput: successful operations divided by measured wall time
+- Average latency: successful operation latency only
+
+The source-object preparation and final cleanup are outside measured phases.
+A 512 MiB write that starts before the duration deadline is allowed to finish,
+so the write phase can run longer than the configured duration. Use
+`cargo run -- --help` for all flags and environment variables.

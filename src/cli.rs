@@ -1,6 +1,6 @@
-use clap::{Parser, Subcommand};
+use clap::Parser;
 
-use crate::config::StorageArgs;
+use crate::config::{BenchmarkArgs, StorageArgs};
 
 #[derive(Parser)]
 #[command(
@@ -12,18 +12,8 @@ pub struct Cli {
     #[command(flatten)]
     pub storage: StorageArgs,
 
-    #[command(subcommand)]
-    pub command: Command,
-}
-
-#[derive(Subcommand)]
-pub enum Command {
-    /// Validate capabilities and perform a read-only connectivity check.
-    Check {
-        /// Stat this object instead of listing one entry under the benchmark prefix.
-        #[arg(long)]
-        object: Option<String>,
-    },
+    #[command(flatten)]
+    pub benchmark: BenchmarkArgs,
 }
 
 #[cfg(test)]
@@ -31,13 +21,12 @@ mod tests {
     use clap::Parser;
 
     use super::*;
-    use crate::config::StorageConfig;
+    use crate::config::{BenchmarkConfig, StorageConfig};
 
     #[test]
-    fn parses_storage_settings_and_check_command() {
+    fn parses_storage_and_benchmark_settings() {
         let cli = Cli::try_parse_from([
             "object-storage-perf",
-            "check",
             "--endpoint",
             "https://storage.example.com",
             "--bucket",
@@ -46,25 +35,28 @@ mod tests {
             "access",
             "--secret-access-key",
             "secret",
-            "--object",
-            "existing/object",
+            "--concurrency",
+            "16",
         ])
         .unwrap();
 
-        assert!(matches!(
-            cli.command,
-            Command::Check {
-                object: Some(ref path)
-            } if path == "existing/object"
-        ));
+        assert_eq!(cli.benchmark.concurrency, 16);
     }
 
     #[test]
     fn requires_storage_credentials() {
-        let cli = Cli::try_parse_from(["object-storage-perf", "check"]).unwrap();
+        let cli = Cli::try_parse_from(["object-storage-perf"]).unwrap();
         let error = StorageConfig::try_from(cli.storage).err().unwrap();
 
         let message = error.to_string();
         assert!(message.contains("endpoint is required"));
+    }
+
+    #[test]
+    fn validates_benchmark_settings() {
+        let cli = Cli::try_parse_from(["object-storage-perf", "--concurrency", "0"]).unwrap();
+        let error = BenchmarkConfig::try_from(cli.benchmark).err().unwrap();
+
+        assert!(error.to_string().contains("concurrency"));
     }
 }
