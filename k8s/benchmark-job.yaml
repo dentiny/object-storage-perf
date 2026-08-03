@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: object-storage-perf
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: object-storage-perf
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: object-storage-perf
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      imagePullSecrets:
+        - name: __IMAGE_PULL_SECRET__
+      containers:
+        - name: benchmark
+          image: __BENCHMARK_IMAGE__
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: OSP_ENDPOINT
+              value: __OSP_ENDPOINT__
+            - name: OSP_BUCKET
+              value: __OSP_BUCKET__
+            - name: OSP_REGION
+              value: __OSP_REGION__
+            - name: OSP_PREFIX
+              value: __OSP_PREFIX__
+            - name: OSP_DURATION
+              value: "__OSP_DURATION__"
+            - name: OSP_CONCURRENCY
+              value: "__OSP_CONCURRENCY__"
+            - name: OSP_MULTIPART_CONCURRENCY
+              value: "__OSP_MULTIPART_CONCURRENCY__"
+            - name: OSP_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: __S3_SECRET__
+                  key: access-key-id
+            - name: OSP_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: __S3_SECRET__
+                  key: secret-access-key
+          resources:
+            requests:
+              cpu: 250m
+              memory: 128Mi
+            limits:
+              cpu: "4"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL

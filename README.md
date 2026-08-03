@@ -66,3 +66,60 @@ At the duration deadline, in-flight reads and stat requests are canceled and
 in-progress multipart writes are aborted. Multipart abort and final cleanup can
 add a small amount of wall time after measurement stops. Use
 `cargo run -- --help` for all flags and environment variables.
+
+## Run on OKE
+
+OKE workers are Linux/AMD64. On an Apple Silicon workstation, cross-compile a
+static AMD64 binary locally with Zig, then let Docker package only that binary:
+
+```console
+brew install zig rustup docker-buildx
+rustup toolchain install 1.91.1
+rustup target add x86_64-unknown-linux-musl --toolchain 1.91.1
+cargo install cargo-zigbuild
+
+docker login phx.ocir.io
+IMAGE_TAG=benchmark-001 bash scripts/build-image.sh
+```
+
+The default repository is
+`phx.ocir.io/axnzj5nsewcd/object-storage-perf`. Override it with
+`IMAGE_REPOSITORY`. Always use a unique immutable tag. To package and test
+without pushing:
+
+```console
+PUSH_IMAGE=0 \
+IMAGE_REPOSITORY=object-storage-perf \
+IMAGE_TAG=local-amd64 \
+bash scripts/build-image.sh
+
+docker run --rm --platform linux/amd64 \
+  object-storage-perf:local-amd64 --help
+```
+
+Create the benchmark credential Secret out of band. The access key and secret
+must be an OCI Customer Secret Key when using Oracle's S3-compatible endpoint:
+
+```console
+kubectl -n default create secret generic object-storage-perf-s3 \
+  --from-literal=access-key-id="$OSP_ACCESS_KEY_ID" \
+  --from-literal=secret-access-key="$OSP_SECRET_ACCESS_KEY"
+```
+
+The Job expects an OCIR pull Secret named `ocir-secret`. Deploy the immutable
+image and follow its report:
+
+```console
+BENCHMARK_IMAGE=phx.ocir.io/axnzj5nsewcd/object-storage-perf:benchmark-001 \
+OSP_ENDPOINT=https://axnzj5nsewcd.compat.objectstorage.us-phoenix-1.oraclecloud.com \
+OSP_BUCKET=my-benchmark-bucket \
+OSP_REGION=us-phoenix-1 \
+OSP_DURATION=30 \
+OSP_CONCURRENCY=16 \
+bash k8s/deploy-job.sh
+
+kubectl -n default logs -f job/object-storage-perf
+```
+
+Use `NAMESPACE`, `S3_SECRET`, or `IMAGE_PULL_SECRET` to override the Kubernetes
+defaults. Neither the image build nor the Kubernetes Job compiles Rust.
