@@ -31,7 +31,7 @@ mod tests {
     use clap::Parser;
 
     use super::*;
-    use crate::config::{AddressingStyle, StorageConfig};
+    use crate::config::StorageConfig;
 
     #[test]
     fn parses_storage_settings_and_check_command() {
@@ -46,14 +46,11 @@ mod tests {
             "access",
             "--secret-access-key",
             "secret",
-            "--addressing-style",
-            "virtual-hosted",
             "--object",
             "existing/object",
         ])
         .unwrap();
 
-        assert_eq!(cli.storage.addressing_style, AddressingStyle::VirtualHosted);
         assert!(matches!(
             cli.command,
             Command::Check {

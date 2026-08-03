@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use futures_util::TryStreamExt;
 use opendal::{Operator, services};
 
-use crate::config::{AddressingStyle, StorageConfig};
+use crate::config::StorageConfig;
 
 pub struct Storage {
     operator: Operator,
@@ -23,17 +23,13 @@ pub enum CheckResult {
 
 impl Storage {
     pub fn new(config: StorageConfig) -> Result<Self> {
-        let mut builder = services::S3::default()
+        let builder = services::S3::default()
             .bucket(&config.bucket)
             .endpoint(&config.endpoint)
             .region(&config.region)
             .access_key_id(&config.access_key_id)
             .secret_access_key(&config.secret_access_key)
             .disable_config_load();
-
-        if config.addressing_style == AddressingStyle::VirtualHosted {
-            builder = builder.enable_virtual_host_style();
-        }
 
         let operator = Operator::new(builder).context("failed to configure S3 operator")?;
         validate_capabilities(&operator)?;

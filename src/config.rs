@@ -1,15 +1,8 @@
 use anyhow::{Result, bail};
-use clap::{Args, ValueEnum};
+use clap::Args;
 
 const DEFAULT_REGION: &str = "us-east-1";
 const DEFAULT_PREFIX: &str = "object-storage-perf";
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
-pub enum AddressingStyle {
-    #[default]
-    Path,
-    VirtualHosted,
-}
 
 #[derive(Args, Clone)]
 pub struct StorageArgs {
@@ -51,16 +44,6 @@ pub struct StorageArgs {
         global = true
     )]
     pub prefix: String,
-
-    /// Bucket addressing style.
-    #[arg(
-        long,
-        env = "OSP_ADDRESSING_STYLE",
-        value_enum,
-        default_value_t,
-        global = true
-    )]
-    pub addressing_style: AddressingStyle,
 }
 
 pub struct StorageConfig {
@@ -70,7 +53,6 @@ pub struct StorageConfig {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub prefix: String,
-    pub addressing_style: AddressingStyle,
 }
 
 impl TryFrom<StorageArgs> for StorageConfig {
@@ -99,7 +81,6 @@ impl TryFrom<StorageArgs> for StorageConfig {
             access_key_id,
             secret_access_key,
             prefix,
-            addressing_style: args.addressing_style,
         })
     }
 }
@@ -129,7 +110,6 @@ mod tests {
             access_key_id: Some("access".to_owned()),
             secret_access_key: Some("secret".to_owned()),
             prefix: "/runs/".to_owned(),
-            addressing_style: AddressingStyle::Path,
         }
     }
 

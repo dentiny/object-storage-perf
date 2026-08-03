@@ -18,10 +18,6 @@ export OSP_SECRET_ACCESS_KEY=...
 export OSP_PREFIX=object-storage-perf
 ```
 
-AWS S3 and most compatible services use path-style addressing by default.
-Select virtual-hosted addressing where required with
-`OSP_ADDRESSING_STYLE=virtual-hosted`.
-
 Do not commit credentials. Environment variables are preferable to credential
 flags because command-line values can be visible in process listings.
 
