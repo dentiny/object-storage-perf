@@ -59,7 +59,7 @@ The measured phases use:
 - Write throughput: successfully completed object bytes divided by measured
   wall time
 - Stat throughput: successful operations divided by measured wall time
-- Average latency: successful operation latency only
+- Latency: HDR histogram mean, p50, p95, and p99 for successful operations
 
 The source-object preparation and final cleanup are outside measured phases.
 At the duration deadline, in-flight reads and stat requests are canceled and

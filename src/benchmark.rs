@@ -49,7 +49,7 @@ impl BenchmarkSuite {
             self.config.multipart_concurrency,
             &self.full_part,
             &self.final_part,
-            /* deadline = */ None,
+            /*deadline=*/ None,
         )
         .await
         .context("failed to prepare read/stat source object")?;
@@ -99,6 +99,7 @@ impl BenchmarkSuite {
 
             workers.spawn(async move {
                 let mut block = worker_id as u64;
+                let mut latency = recorder.latency_recorder();
                 loop {
                     let offset = (block % (OBJECT_SIZE / READ_SIZE)) * READ_SIZE;
                     block += concurrency;
@@ -126,7 +127,11 @@ impl BenchmarkSuite {
 
                     match result {
                         Ok(()) => {
-                            recorder.record_success(operation_started.elapsed(), READ_SIZE);
+                            recorder.record_success(
+                                &mut latency,
+                                operation_started.elapsed(),
+                                READ_SIZE,
+                            );
                         }
                         Err(error) => recorder.record_error(&error),
                     }
@@ -155,6 +160,7 @@ impl BenchmarkSuite {
 
             workers.spawn(async move {
                 let mut sequence = 0_u64;
+                let mut latency = recorder.latency_recorder();
 
                 loop {
                     let path = format!(
@@ -175,7 +181,11 @@ impl BenchmarkSuite {
 
                     match result {
                         Ok(true) => {
-                            recorder.record_success(operation_started.elapsed(), OBJECT_SIZE);
+                            recorder.record_success(
+                                &mut latency,
+                                operation_started.elapsed(),
+                                OBJECT_SIZE,
+                            );
                         }
                         Ok(false) => break,
                         Err(error) => recorder.record_error(&error),
@@ -201,6 +211,7 @@ impl BenchmarkSuite {
             let path = Arc::clone(&path);
 
             workers.spawn(async move {
+                let mut latency = recorder.latency_recorder();
                 loop {
                     let operation_started = Instant::now();
                     let Some(result) =
@@ -220,7 +231,9 @@ impl BenchmarkSuite {
                     });
 
                     match result {
-                        Ok(()) => recorder.record_success(operation_started.elapsed(), 0),
+                        Ok(()) => {
+                            recorder.record_success(&mut latency, operation_started.elapsed(), 0);
+                        }
                         Err(error) => recorder.record_error(&error),
                     }
                 }
