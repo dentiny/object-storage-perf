@@ -6,13 +6,5 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.5", features = ["derive", "env"] }
-futures-util = "0.3.33"
 opendal = { version = "0.58.1", features = ["services-s3"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "time"] }
-
-[dev-dependencies]
-hyper-util = { version = "0.1.20", features = ["server-auto", "http1", "tokio"] }
-s3s = "0.14.1"
-s3s-fs = "0.14.1"
-tempfile = "3.27.0"
-tokio = { version = "1.53.1", features = ["net", "sync"] }

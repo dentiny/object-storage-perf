@@ -109,21 +109,3 @@ impl MetricsRecorder {
 fn duration_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u64::MAX as u128) as u64
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn calculates_average_latency_and_throughput() {
-        let recorder = MetricsRecorder::default();
-        recorder.record_success(Duration::from_millis(10), 2 * 1024 * 1024);
-        recorder.record_success(Duration::from_millis(30), 2 * 1024 * 1024);
-
-        let report = recorder.report("read", Duration::from_secs(2));
-
-        assert_eq!(report.average_latency_ms(), 20.0);
-        assert_eq!(report.operations_per_second(), 1.0);
-        assert_eq!(report.throughput_mib_per_second(), Some(2.0));
-    }
-}

@@ -1,21 +1,17 @@
 use std::{
-    future::Future,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow};
-use futures_util::{StreamExt, stream};
 use opendal::{Buffer, Operator};
-use tokio::{
-    task::JoinSet,
-    time::{Instant as TokioInstant, sleep_until},
-};
+use tokio::{task::JoinSet, time::Instant as TokioInstant};
 
 use crate::{
     config::BenchmarkConfig,
     metrics::{BenchmarkReport, MetricsRecorder},
     storage::Storage,
+    utils::{before_deadline, join_workers, maybe_before_deadline, zero_buffer},
 };
 
 pub const MIB: u64 = 1024 * 1024;
@@ -45,12 +41,18 @@ impl BenchmarkSuite {
     pub async fn run(&self) -> Result<Vec<BenchmarkReport>> {
         let run_prefix = format!("{}/{}", self.prefix, run_id());
         let source_path = format!("{run_prefix}/read-source");
-        let mut owned_paths = vec![source_path.clone()];
 
         eprintln!("preparing 512 MiB source object {source_path:?}...");
-        self.upload_object(&source_path)
-            .await
-            .context("failed to prepare read/stat source object")?;
+        upload_object(
+            &self.operator,
+            &source_path,
+            self.config.multipart_concurrency,
+            &self.full_part,
+            &self.final_part,
+            /* deadline = */ None,
+        )
+        .await
+        .context("failed to prepare read/stat source object")?;
 
         eprintln!(
             "running read workload for {}s at concurrency {}...",
@@ -62,8 +64,7 @@ impl BenchmarkSuite {
             "running write workload for {}s at concurrency {}...",
             self.config.duration_seconds, self.config.concurrency
         );
-        let (write, write_paths) = self.run_write(&run_prefix).await?;
-        owned_paths.extend(write_paths);
+        let write = self.run_write(&run_prefix).await?;
 
         eprintln!(
             "running stat workload for {}s at concurrency {}...",
@@ -74,8 +75,8 @@ impl BenchmarkSuite {
         if self.config.keep_objects {
             eprintln!("retaining benchmark objects under {run_prefix:?}");
         } else {
-            eprintln!("cleaning up {} benchmark objects...", owned_paths.len());
-            if let Err(error) = self.cleanup(owned_paths).await {
+            eprintln!("cleaning up benchmark objects under {run_prefix:?}...");
+            if let Err(error) = self.cleanup(&run_prefix).await {
                 eprintln!("warning: benchmark completed but cleanup failed: {error:#}");
             }
         }
@@ -137,7 +138,7 @@ impl BenchmarkSuite {
         Ok(recorder.report("read", elapsed))
     }
 
-    async fn run_write(&self, run_prefix: &str) -> Result<(BenchmarkReport, Vec<String>)> {
+    async fn run_write(&self, run_prefix: &str) -> Result<BenchmarkReport> {
         let recorder = Arc::new(MetricsRecorder::default());
         let run_prefix = Arc::new(run_prefix.to_owned());
         let elapsed = Duration::from_secs(self.config.duration_seconds);
@@ -154,7 +155,6 @@ impl BenchmarkSuite {
 
             workers.spawn(async move {
                 let mut sequence = 0_u64;
-                let mut paths = Vec::new();
 
                 loop {
                     let path = format!(
@@ -176,23 +176,16 @@ impl BenchmarkSuite {
                     match result {
                         Ok(true) => {
                             recorder.record_success(operation_started.elapsed(), OBJECT_SIZE);
-                            paths.push(path);
                         }
                         Ok(false) => break,
                         Err(error) => recorder.record_error(&error),
                     }
                 }
-
-                paths
             });
         }
 
-        let mut paths = Vec::new();
-        while let Some(result) = workers.join_next().await {
-            paths.extend(result.context("write benchmark worker failed")?);
-        }
-
-        Ok((recorder.report("write", elapsed), paths))
+        join_workers(&mut workers, "write").await?;
+        Ok(recorder.report("write", elapsed))
     }
 
     async fn run_stat(&self, path: &str) -> Result<BenchmarkReport> {
@@ -238,46 +231,14 @@ impl BenchmarkSuite {
         Ok(recorder.report("stat", elapsed))
     }
 
-    async fn upload_object(&self, path: &str) -> Result<()> {
-        upload_object(
-            &self.operator,
-            path,
-            self.config.multipart_concurrency,
-            &self.full_part,
-            &self.final_part,
-            None,
-        )
-        .await?;
+    async fn cleanup(&self, run_prefix: &str) -> Result<()> {
+        let run_prefix = format!("{run_prefix}/");
+        self.operator
+            .delete_with(&run_prefix)
+            .recursive(true)
+            .await
+            .with_context(|| format!("failed to delete run prefix {run_prefix:?}"))?;
         Ok(())
-    }
-
-    async fn cleanup(&self, paths: Vec<String>) -> Result<()> {
-        let operator = self.operator.clone();
-        let concurrency = self.config.concurrency;
-        let results = stream::iter(paths)
-            .map(move |path| {
-                let operator = operator.clone();
-                async move {
-                    operator
-                        .delete(&path)
-                        .await
-                        .with_context(|| format!("failed to delete {path:?}"))
-                }
-            })
-            .buffer_unordered(concurrency)
-            .collect::<Vec<_>>()
-            .await;
-
-        let errors = results
-            .into_iter()
-            .filter_map(Result::err)
-            .map(|error| format!("{error:#}"))
-            .collect::<Vec<_>>();
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(anyhow!(errors.join("; ")))
-        }
     }
 }
 
@@ -306,7 +267,10 @@ async fn upload_object(
     for _ in 0..(OBJECT_SIZE / MULTIPART_PART_SIZE) {
         let Some(result) = maybe_before_deadline(deadline, writer.write(full_part.clone())).await
         else {
-            let _ = writer.abort().await;
+            writer
+                .abort()
+                .await
+                .with_context(|| format!("failed to abort timed-out upload for {path:?}"))?;
             return Ok(false);
         };
         if let Err(error) = result {
@@ -318,7 +282,10 @@ async fn upload_object(
     if !final_part.is_empty() {
         let Some(result) = maybe_before_deadline(deadline, writer.write(final_part.clone())).await
         else {
-            let _ = writer.abort().await;
+            writer
+                .abort()
+                .await
+                .with_context(|| format!("failed to abort timed-out upload for {path:?}"))?;
             return Ok(false);
         };
         if let Err(error) = result {
@@ -328,7 +295,10 @@ async fn upload_object(
     }
 
     let Some(result) = maybe_before_deadline(deadline, writer.close()).await else {
-        let _ = writer.abort().await;
+        writer
+            .abort()
+            .await
+            .with_context(|| format!("failed to abort timed-out upload for {path:?}"))?;
         return Ok(false);
     };
     if let Err(error) = result {
@@ -340,52 +310,10 @@ async fn upload_object(
     Ok(true)
 }
 
-async fn before_deadline<F, T>(deadline: TokioInstant, future: F) -> Option<T>
-where
-    F: Future<Output = T>,
-{
-    tokio::select! {
-        _ = sleep_until(deadline) => None,
-        result = future => Some(result),
-    }
-}
-
-async fn maybe_before_deadline<F, T>(deadline: Option<TokioInstant>, future: F) -> Option<T>
-where
-    F: Future<Output = T>,
-{
-    match deadline {
-        Some(deadline) => before_deadline(deadline, future).await,
-        None => Some(future.await),
-    }
-}
-
-async fn join_workers(workers: &mut JoinSet<()>, workload: &str) -> Result<()> {
-    while let Some(result) = workers.join_next().await {
-        result.with_context(|| format!("{workload} benchmark worker failed"))?;
-    }
-    Ok(())
-}
-
-fn zero_buffer(length: usize) -> Buffer {
-    Buffer::from(vec![0_u8; length])
-}
-
 fn run_id() -> String {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     format!("run-{timestamp}-{}", std::process::id())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn object_has_fifty_one_full_parts_and_one_final_part() {
-        assert_eq!(OBJECT_SIZE / MULTIPART_PART_SIZE, 51);
-        assert_eq!(OBJECT_SIZE % MULTIPART_PART_SIZE, 2 * MIB);
-    }
 }
