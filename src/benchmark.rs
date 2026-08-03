@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -6,7 +7,10 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use futures_util::{StreamExt, stream};
 use opendal::{Buffer, Operator};
-use tokio::task::JoinSet;
+use tokio::{
+    task::JoinSet,
+    time::{Instant as TokioInstant, sleep_until},
+};
 
 use crate::{
     config::BenchmarkConfig,
@@ -33,8 +37,8 @@ impl BenchmarkSuite {
             operator: storage.operator().clone(),
             prefix: storage.prefix().to_owned(),
             config,
-            full_part: deterministic_buffer(MULTIPART_PART_SIZE as usize, 0x5eed),
-            final_part: deterministic_buffer((OBJECT_SIZE % MULTIPART_PART_SIZE) as usize, 0x51de),
+            full_part: zero_buffer(MULTIPART_PART_SIZE as usize),
+            final_part: zero_buffer((OBJECT_SIZE % MULTIPART_PART_SIZE) as usize),
         }
     }
 
@@ -82,8 +86,8 @@ impl BenchmarkSuite {
     async fn run_read(&self, path: &str) -> Result<BenchmarkReport> {
         let recorder = Arc::new(MetricsRecorder::default());
         let path = Arc::new(path.to_owned());
-        let started = Instant::now();
-        let deadline = started + Duration::from_secs(self.config.duration_seconds);
+        let elapsed = Duration::from_secs(self.config.duration_seconds);
+        let deadline = TokioInstant::now() + elapsed;
         let mut workers = JoinSet::new();
 
         for worker_id in 0..self.config.concurrency {
@@ -94,25 +98,30 @@ impl BenchmarkSuite {
 
             workers.spawn(async move {
                 let mut block = worker_id as u64;
-                while Instant::now() < deadline {
+                loop {
                     let offset = (block % (OBJECT_SIZE / READ_SIZE)) * READ_SIZE;
                     block += concurrency;
                     let operation_started = Instant::now();
-                    let result = operator
-                        .read_with(path.as_str())
-                        .range(offset..offset + READ_SIZE)
-                        .await
-                        .map_err(anyhow::Error::from)
-                        .and_then(|buffer| {
-                            if buffer.len() as u64 == READ_SIZE {
-                                Ok(())
-                            } else {
-                                Err(anyhow!(
-                                    "short read at offset {offset}: expected {READ_SIZE} bytes, got {}",
-                                    buffer.len()
-                                ))
-                            }
-                        });
+                    let Some(result) = before_deadline(deadline, async {
+                        operator
+                            .read_with(path.as_str())
+                            .range(offset..offset + READ_SIZE)
+                            .await
+                    })
+                    .await
+                    else {
+                        break;
+                    };
+                    let result = result.map_err(anyhow::Error::from).and_then(|buffer| {
+                        if buffer.len() as u64 == READ_SIZE {
+                            Ok(())
+                        } else {
+                            Err(anyhow!(
+                                "short read at offset {offset}: expected {READ_SIZE} bytes, got {}",
+                                buffer.len()
+                            ))
+                        }
+                    });
 
                     match result {
                         Ok(()) => {
@@ -125,14 +134,14 @@ impl BenchmarkSuite {
         }
 
         join_workers(&mut workers, "read").await?;
-        Ok(recorder.report("read", started.elapsed()))
+        Ok(recorder.report("read", elapsed))
     }
 
     async fn run_write(&self, run_prefix: &str) -> Result<(BenchmarkReport, Vec<String>)> {
         let recorder = Arc::new(MetricsRecorder::default());
         let run_prefix = Arc::new(run_prefix.to_owned());
-        let started = Instant::now();
-        let deadline = started + Duration::from_secs(self.config.duration_seconds);
+        let elapsed = Duration::from_secs(self.config.duration_seconds);
+        let deadline = TokioInstant::now() + elapsed;
         let mut workers = JoinSet::new();
 
         for worker_id in 0..self.config.concurrency {
@@ -147,7 +156,7 @@ impl BenchmarkSuite {
                 let mut sequence = 0_u64;
                 let mut paths = Vec::new();
 
-                while Instant::now() < deadline {
+                loop {
                     let path = format!(
                         "{}/writes/worker-{worker_id}/object-{sequence}",
                         run_prefix.as_str()
@@ -160,14 +169,16 @@ impl BenchmarkSuite {
                         multipart_concurrency,
                         &full_part,
                         &final_part,
+                        Some(deadline),
                     )
                     .await;
 
                     match result {
-                        Ok(()) => {
+                        Ok(true) => {
                             recorder.record_success(operation_started.elapsed(), OBJECT_SIZE);
                             paths.push(path);
                         }
+                        Ok(false) => break,
                         Err(error) => recorder.record_error(&error),
                     }
                 }
@@ -181,14 +192,14 @@ impl BenchmarkSuite {
             paths.extend(result.context("write benchmark worker failed")?);
         }
 
-        Ok((recorder.report("write", started.elapsed()), paths))
+        Ok((recorder.report("write", elapsed), paths))
     }
 
     async fn run_stat(&self, path: &str) -> Result<BenchmarkReport> {
         let recorder = Arc::new(MetricsRecorder::default());
         let path = Arc::new(path.to_owned());
-        let started = Instant::now();
-        let deadline = started + Duration::from_secs(self.config.duration_seconds);
+        let elapsed = Duration::from_secs(self.config.duration_seconds);
+        let deadline = TokioInstant::now() + elapsed;
         let mut workers = JoinSet::new();
 
         for _ in 0..self.config.concurrency {
@@ -197,22 +208,23 @@ impl BenchmarkSuite {
             let path = Arc::clone(&path);
 
             workers.spawn(async move {
-                while Instant::now() < deadline {
+                loop {
                     let operation_started = Instant::now();
-                    let result = operator
-                        .stat(path.as_str())
-                        .await
-                        .map_err(anyhow::Error::from)
-                        .and_then(|metadata| {
-                            if metadata.content_length() == OBJECT_SIZE {
-                                Ok(())
-                            } else {
-                                Err(anyhow!(
-                                    "unexpected object size: expected {OBJECT_SIZE}, got {}",
-                                    metadata.content_length()
-                                ))
-                            }
-                        });
+                    let Some(result) =
+                        before_deadline(deadline, operator.stat(path.as_str())).await
+                    else {
+                        break;
+                    };
+                    let result = result.map_err(anyhow::Error::from).and_then(|metadata| {
+                        if metadata.content_length() == OBJECT_SIZE {
+                            Ok(())
+                        } else {
+                            Err(anyhow!(
+                                "unexpected object size: expected {OBJECT_SIZE}, got {}",
+                                metadata.content_length()
+                            ))
+                        }
+                    });
 
                     match result {
                         Ok(()) => recorder.record_success(operation_started.elapsed(), 0),
@@ -223,7 +235,7 @@ impl BenchmarkSuite {
         }
 
         join_workers(&mut workers, "stat").await?;
-        Ok(recorder.report("stat", started.elapsed()))
+        Ok(recorder.report("stat", elapsed))
     }
 
     async fn upload_object(&self, path: &str) -> Result<()> {
@@ -233,8 +245,10 @@ impl BenchmarkSuite {
             self.config.multipart_concurrency,
             &self.full_part,
             &self.final_part,
+            None,
         )
-        .await
+        .await?;
+        Ok(())
     }
 
     async fn cleanup(&self, paths: Vec<String>) -> Result<()> {
@@ -273,35 +287,77 @@ async fn upload_object(
     multipart_concurrency: usize,
     full_part: &Buffer,
     final_part: &Buffer,
-) -> Result<()> {
-    let mut writer = operator
-        .writer_with(path)
-        .chunk(MULTIPART_PART_SIZE as usize)
-        .concurrent(multipart_concurrency)
-        .await
-        .with_context(|| format!("failed to start multipart upload for {path:?}"))?;
+    deadline: Option<TokioInstant>,
+) -> Result<bool> {
+    let Some(writer) = maybe_before_deadline(deadline, async {
+        operator
+            .writer_with(path)
+            .chunk(MULTIPART_PART_SIZE as usize)
+            .concurrent(multipart_concurrency)
+            .await
+    })
+    .await
+    else {
+        return Ok(false);
+    };
+    let mut writer =
+        writer.with_context(|| format!("failed to start multipart upload for {path:?}"))?;
 
     for _ in 0..(OBJECT_SIZE / MULTIPART_PART_SIZE) {
-        if let Err(error) = writer.write(full_part.clone()).await {
+        let Some(result) = maybe_before_deadline(deadline, writer.write(full_part.clone())).await
+        else {
+            let _ = writer.abort().await;
+            return Ok(false);
+        };
+        if let Err(error) = result {
             let _ = writer.abort().await;
             return Err(error).with_context(|| format!("failed to upload part for {path:?}"));
         }
     }
 
-    if !final_part.is_empty()
-        && let Err(error) = writer.write(final_part.clone()).await
-    {
-        let _ = writer.abort().await;
-        return Err(error).with_context(|| format!("failed to upload final part for {path:?}"));
+    if !final_part.is_empty() {
+        let Some(result) = maybe_before_deadline(deadline, writer.write(final_part.clone())).await
+        else {
+            let _ = writer.abort().await;
+            return Ok(false);
+        };
+        if let Err(error) = result {
+            let _ = writer.abort().await;
+            return Err(error).with_context(|| format!("failed to upload final part for {path:?}"));
+        }
     }
 
-    if let Err(error) = writer.close().await {
+    let Some(result) = maybe_before_deadline(deadline, writer.close()).await else {
+        let _ = writer.abort().await;
+        return Ok(false);
+    };
+    if let Err(error) = result {
         let _ = writer.abort().await;
         return Err(error)
             .with_context(|| format!("failed to complete multipart upload for {path:?}"));
     }
 
-    Ok(())
+    Ok(true)
+}
+
+async fn before_deadline<F, T>(deadline: TokioInstant, future: F) -> Option<T>
+where
+    F: Future<Output = T>,
+{
+    tokio::select! {
+        _ = sleep_until(deadline) => None,
+        result = future => Some(result),
+    }
+}
+
+async fn maybe_before_deadline<F, T>(deadline: Option<TokioInstant>, future: F) -> Option<T>
+where
+    F: Future<Output = T>,
+{
+    match deadline {
+        Some(deadline) => before_deadline(deadline, future).await,
+        None => Some(future.await),
+    }
 }
 
 async fn join_workers(workers: &mut JoinSet<()>, workload: &str) -> Result<()> {
@@ -311,16 +367,8 @@ async fn join_workers(workers: &mut JoinSet<()>, workload: &str) -> Result<()> {
     Ok(())
 }
 
-fn deterministic_buffer(length: usize, seed: u64) -> Buffer {
-    let mut state = seed;
-    let mut bytes = vec![0_u8; length];
-    for byte in &mut bytes {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        *byte = state as u8;
-    }
-    Buffer::from(bytes)
+fn zero_buffer(length: usize) -> Buffer {
+    Buffer::from(vec![0_u8; length])
 }
 
 fn run_id() -> String {
@@ -334,17 +382,6 @@ fn run_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn generated_data_is_deterministic_and_not_zero_filled() {
-        let first = deterministic_buffer(1024, 42);
-        let second = deterministic_buffer(1024, 42);
-        let first = first.to_vec();
-        let second = second.to_vec();
-
-        assert_eq!(first, second);
-        assert!(first.iter().any(|byte| *byte != 0));
-    }
 
     #[test]
     fn object_has_fifty_one_full_parts_and_one_final_part() {

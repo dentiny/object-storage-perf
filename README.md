@@ -62,6 +62,7 @@ The measured phases use:
 - Average latency: successful operation latency only
 
 The source-object preparation and final cleanup are outside measured phases.
-A 512 MiB write that starts before the duration deadline is allowed to finish,
-so the write phase can run longer than the configured duration. Use
+At the duration deadline, in-flight reads and stat requests are canceled and
+in-progress multipart writes are aborted. Multipart abort and final cleanup can
+add a small amount of wall time after measurement stops. Use
 `cargo run -- --help` for all flags and environment variables.
