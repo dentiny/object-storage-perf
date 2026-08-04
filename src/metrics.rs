@@ -25,6 +25,8 @@ pub struct BenchmarkReport {
     pub p95_latency_ms: f64,
     pub p99_latency_ms: f64,
     pub error_categories: Vec<(String, u64)>,
+    pub control_errors: u64,
+    pub control_error_categories: Vec<(String, u64)>,
     pub first_error: Option<String>,
 }
 
@@ -87,6 +89,20 @@ impl fmt::Display for BenchmarkReport {
             write!(formatter, " | error categories: {categories}")?;
         }
 
+        if self.control_errors > 0 {
+            let categories = self
+                .control_error_categories
+                .iter()
+                .map(|(category, count)| format!("{category}={count}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            write!(
+                formatter,
+                " | control errors: {} ({categories})",
+                self.control_errors
+            )?;
+        }
+
         if let Some(error) = &self.first_error {
             write!(formatter, " | first error: {error}")?;
         }
@@ -101,6 +117,8 @@ pub(crate) struct MetricsRecorder {
     bytes: AtomicU64,
     latency: Mutex<Histogram<u64>>,
     error_categories: Mutex<BTreeMap<String, u64>>,
+    control_errors: AtomicU64,
+    control_error_categories: Mutex<BTreeMap<String, u64>>,
     first_error: Mutex<Option<String>>,
 }
 
@@ -115,6 +133,8 @@ impl Default for MetricsRecorder {
                     .expect("valid histogram bounds"),
             ),
             error_categories: Mutex::new(BTreeMap::new()),
+            control_errors: AtomicU64::new(0),
+            control_error_categories: Mutex::new(BTreeMap::new()),
             first_error: Mutex::new(None),
         }
     }
@@ -139,6 +159,22 @@ impl MetricsRecorder {
             .unwrap()
             .entry(category)
             .or_default() += 1;
+        self.record_first_error(error);
+    }
+
+    pub(crate) fn record_control_error(&self, stage: &str, error: &anyhow::Error) {
+        self.control_errors.fetch_add(1, Ordering::SeqCst);
+        let category = format!("{stage}:{category}", category = error_category(error));
+        *self
+            .control_error_categories
+            .lock()
+            .unwrap()
+            .entry(category)
+            .or_default() += 1;
+        self.record_first_error(error);
+    }
+
+    fn record_first_error(&self, error: &anyhow::Error) {
         let mut first_error = self.first_error.lock().unwrap();
         if first_error.is_none() {
             *first_error = Some(format!("{error:#}"));
@@ -160,6 +196,14 @@ impl MetricsRecorder {
             p99_latency_ms: nanos_to_millis(latency.value_at_quantile(0.99) as f64),
             error_categories: self
                 .error_categories
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(category, count)| (category.clone(), *count))
+                .collect(),
+            control_errors: self.control_errors.load(Ordering::SeqCst),
+            control_error_categories: self
+                .control_error_categories
                 .lock()
                 .unwrap()
                 .iter()

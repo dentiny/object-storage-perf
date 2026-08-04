@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use opendal::{Buffer, Operator};
 use tokio::{sync::Semaphore, task::JoinSet, time::Instant as TokioInstant};
 
@@ -56,7 +56,8 @@ impl BenchmarkSuite {
                     match result {
                         Ok(true) => {}
                         Ok(false) => break,
-                        Err(error) => recorder.record_error(&error),
+                        // upload_object records measured and control failures separately.
+                        Err(_) => {}
                     }
                 }
             });
@@ -83,20 +84,37 @@ pub(super) async fn upload_object(
         .writer_with(path)
         .chunk(MULTIPART_PART_SIZE as usize)
         .await;
-    let mut writer =
-        writer.with_context(|| format!("failed to start multipart upload for {path:?}"))?;
+    let mut writer = match writer {
+        Ok(writer) => writer,
+        Err(error) => {
+            let error = anyhow::Error::from(error)
+                .context(format!("failed to start multipart upload for {path:?}"));
+            record_upload_error(metrics, "start", false, &error);
+            return Err(error);
+        }
+    };
 
     for _ in 0..(OBJECT_SIZE / MULTIPART_PART_SIZE) {
         let Some(permit) =
             maybe_before_deadline(deadline, Arc::clone(part_writes).acquire_owned()).await
         else {
-            writer
-                .abort()
-                .await
-                .with_context(|| format!("failed to abort timed-out upload for {path:?}"))?;
+            if let Err(error) = writer.abort().await {
+                let error = anyhow::Error::from(error)
+                    .context(format!("failed to abort timed-out upload for {path:?}"));
+                record_upload_error(metrics, "abort", false, &error);
+                return Err(error);
+            }
             return Ok(false);
         };
-        let permit = permit.context("part-write semaphore closed")?;
+        let permit = match permit {
+            Ok(permit) => permit,
+            Err(error) => {
+                let error =
+                    anyhow::Error::from(error).context("part-write semaphore closed unexpectedly");
+                record_upload_error(metrics, "semaphore", false, &error);
+                return Err(error);
+            }
+        };
         let operation_started = Instant::now();
         let result = writer.write(full_part.clone()).await;
         if let Some((recorder, measurement)) = metrics {
@@ -107,8 +125,11 @@ pub(super) async fn upload_object(
         }
         drop(permit);
         if let Err(error) = result {
-            let _ = writer.abort().await;
-            return Err(error).with_context(|| format!("failed to upload part for {path:?}"));
+            let error =
+                anyhow::Error::from(error).context(format!("failed to upload part for {path:?}"));
+            record_upload_error(metrics, "part", true, &error);
+            record_abort_failure(metrics, path, writer.abort().await);
+            return Err(error);
         }
     }
 
@@ -116,13 +137,23 @@ pub(super) async fn upload_object(
         let Some(permit) =
             maybe_before_deadline(deadline, Arc::clone(part_writes).acquire_owned()).await
         else {
-            writer
-                .abort()
-                .await
-                .with_context(|| format!("failed to abort timed-out upload for {path:?}"))?;
+            if let Err(error) = writer.abort().await {
+                let error = anyhow::Error::from(error)
+                    .context(format!("failed to abort timed-out upload for {path:?}"));
+                record_upload_error(metrics, "abort", false, &error);
+                return Err(error);
+            }
             return Ok(false);
         };
-        let permit = permit.context("part-write semaphore closed")?;
+        let permit = match permit {
+            Ok(permit) => permit,
+            Err(error) => {
+                let error =
+                    anyhow::Error::from(error).context("part-write semaphore closed unexpectedly");
+                record_upload_error(metrics, "semaphore", false, &error);
+                return Err(error);
+            }
+        };
         let operation_started = Instant::now();
         let result = writer.write(final_part.clone()).await;
         if let Some((recorder, measurement)) = metrics {
@@ -133,17 +164,49 @@ pub(super) async fn upload_object(
         }
         drop(permit);
         if let Err(error) = result {
-            let _ = writer.abort().await;
-            return Err(error).with_context(|| format!("failed to upload final part for {path:?}"));
+            let error = anyhow::Error::from(error)
+                .context(format!("failed to upload final part for {path:?}"));
+            record_upload_error(metrics, "part", true, &error);
+            record_abort_failure(metrics, path, writer.abort().await);
+            return Err(error);
         }
     }
 
     let result = writer.close().await;
     if let Err(error) = result {
-        let _ = writer.abort().await;
-        return Err(error)
-            .with_context(|| format!("failed to complete multipart upload for {path:?}"));
+        let error = anyhow::Error::from(error)
+            .context(format!("failed to complete multipart upload for {path:?}"));
+        record_upload_error(metrics, "complete", false, &error);
+        record_abort_failure(metrics, path, writer.abort().await);
+        return Err(error);
     }
 
     Ok(true)
+}
+
+fn record_upload_error(
+    metrics: Option<(&MetricsRecorder, &MeasurementWindow)>,
+    stage: &str,
+    part_write: bool,
+    error: &anyhow::Error,
+) {
+    if let Some((recorder, _)) = metrics {
+        if part_write {
+            recorder.record_error(error);
+        } else {
+            recorder.record_control_error(stage, error);
+        }
+    }
+}
+
+fn record_abort_failure(
+    metrics: Option<(&MetricsRecorder, &MeasurementWindow)>,
+    path: &str,
+    result: opendal::Result<()>,
+) {
+    if let Err(error) = result {
+        let error = anyhow::Error::from(error)
+            .context(format!("failed to abort multipart upload for {path:?}"));
+        record_upload_error(metrics, "abort", false, &error);
+    }
 }
