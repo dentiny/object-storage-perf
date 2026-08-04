@@ -37,6 +37,21 @@ impl BenchmarkSuite {
 
     pub async fn run(&self) -> Result<Vec<BenchmarkReport>> {
         let run_prefix = format!("{}/{}", self.prefix, run_id());
+        let result = self.run_workloads(&run_prefix).await;
+
+        if self.config.keep_objects {
+            eprintln!("retaining benchmark objects under {run_prefix:?}");
+        } else {
+            eprintln!("cleaning up benchmark objects under {run_prefix:?}...");
+            if let Err(error) = self.cleanup(&run_prefix).await {
+                eprintln!("warning: benchmark cleanup failed: {error:#}");
+            }
+        }
+
+        result
+    }
+
+    async fn run_workloads(&self, run_prefix: &str) -> Result<Vec<BenchmarkReport>> {
         let source_paths = (0..self.config.read_concurrency)
             .map(|index| format!("{run_prefix}/read-sources/object-{index}"))
             .collect::<Vec<_>>();
@@ -59,22 +74,13 @@ impl BenchmarkSuite {
             "running write workload for {}s at concurrency {}...",
             self.config.write_duration_seconds, self.config.write_concurrency
         );
-        let write = self.run_write(&run_prefix).await?;
+        let write = self.run_write(run_prefix).await?;
 
         eprintln!(
             "running stat workload for {}s at concurrency {}...",
             self.config.stat_duration_seconds, self.config.stat_concurrency
         );
         let stat = self.run_stat(&source_paths[0]).await?;
-
-        if self.config.keep_objects {
-            eprintln!("retaining benchmark objects under {run_prefix:?}");
-        } else {
-            eprintln!("cleaning up benchmark objects under {run_prefix:?}...");
-            if let Err(error) = self.cleanup(&run_prefix).await {
-                eprintln!("warning: benchmark completed but cleanup failed: {error:#}");
-            }
-        }
 
         Ok(vec![read, write, stat])
     }
