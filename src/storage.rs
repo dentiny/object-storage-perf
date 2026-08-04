@@ -1,5 +1,11 @@
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
-use opendal::{Operator, services};
+use opendal::{
+    Operator,
+    layers::{RetryLayer, TimeoutLayer},
+    services,
+};
 
 use crate::config::StorageConfig;
 
@@ -19,7 +25,18 @@ impl Storage {
             .secret_access_key(&config.secret_access_key)
             .disable_config_load();
 
-        let operator = Operator::new(builder).context("failed to configure S3 operator")?;
+        let operator = Operator::new(builder)
+            .context("failed to configure S3 operator")?
+            .layer(
+                TimeoutLayer::default()
+                    .with_timeout(Duration::from_secs(config.timeout_seconds))
+                    .with_io_timeout(Duration::from_secs(config.io_timeout_seconds)),
+            )
+            .layer(
+                RetryLayer::default()
+                    .with_jitter()
+                    .with_max_times(config.retry_max_times),
+            );
         validate_capabilities(&operator)?;
 
         Ok(Self {

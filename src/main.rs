@@ -12,9 +12,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = StorageConfig::try_from(cli.storage)?;
     let benchmark_config = BenchmarkConfig::try_from(cli.benchmark)?;
-    let duration_seconds = benchmark_config.duration_seconds;
-    let concurrency = benchmark_config.concurrency;
-    let multipart_concurrency = benchmark_config.multipart_concurrency;
+    let read_duration = benchmark_config.read_duration_seconds;
+    let write_duration = benchmark_config.write_duration_seconds;
+    let stat_duration = benchmark_config.stat_duration_seconds;
+    let read_concurrency = benchmark_config.read_concurrency;
+    let write_concurrency = benchmark_config.write_concurrency;
+    let stat_concurrency = benchmark_config.stat_concurrency;
     let storage = Storage::new(config)?;
     let benchmark = BenchmarkSuite::new(storage, benchmark_config);
 
@@ -26,7 +29,7 @@ async fn main() -> Result<()> {
         MULTIPART_PART_SIZE / (1024 * 1024)
     );
     println!(
-        "duration: {duration_seconds}s per workload | concurrency: {concurrency} | multipart concurrency: {multipart_concurrency}"
+        "duration read/write/stat: {read_duration}/{write_duration}/{stat_duration}s | in-flight read/part-write/stat: {read_concurrency}/{write_concurrency}/{stat_concurrency}"
     );
 
     let reports = benchmark.run().await?;

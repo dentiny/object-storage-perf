@@ -4,8 +4,10 @@ use clap::Args;
 const DEFAULT_REGION: &str = "us-east-1";
 const DEFAULT_PREFIX: &str = "object-storage-perf";
 const DEFAULT_DURATION_SECONDS: u64 = 10;
-const DEFAULT_CONCURRENCY: usize = 4;
-const DEFAULT_MULTIPART_CONCURRENCY: usize = 1;
+const DEFAULT_IO_CONCURRENCY: usize = 128;
+const DEFAULT_STAT_CONCURRENCY: usize = 4;
+const DEFAULT_RETRY_MAX_TIMES: usize = 3;
+const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 
 #[derive(Args, Clone)]
 pub struct StorageArgs {
@@ -40,25 +42,81 @@ pub struct StorageArgs {
         default_value = DEFAULT_PREFIX
     )]
     pub prefix: String,
+
+    /// Maximum retry attempts for temporary storage errors.
+    #[arg(
+        long,
+        env = "OSP_RETRY_MAX_TIMES",
+        default_value_t = DEFAULT_RETRY_MAX_TIMES
+    )]
+    pub retry_max_times: usize,
+
+    /// Timeout for non-I/O storage operations such as stat.
+    #[arg(
+        long,
+        env = "OSP_TIMEOUT_SECONDS",
+        default_value_t = DEFAULT_TIMEOUT_SECONDS
+    )]
+    pub timeout_seconds: u64,
+
+    /// Timeout for each storage I/O attempt.
+    #[arg(
+        long,
+        env = "OSP_IO_TIMEOUT_SECONDS",
+        default_value_t = DEFAULT_TIMEOUT_SECONDS
+    )]
+    pub io_timeout_seconds: u64,
 }
 
 #[derive(Args, Clone)]
 pub struct BenchmarkArgs {
-    /// Measured duration of each read, write, and stat workload.
-    #[arg(long, env = "OSP_DURATION", default_value_t = DEFAULT_DURATION_SECONDS)]
-    pub duration_seconds: u64,
-
-    /// Number of concurrent logical operations.
-    #[arg(long, env = "OSP_CONCURRENCY", default_value_t = DEFAULT_CONCURRENCY)]
-    pub concurrency: usize,
-
-    /// Concurrent multipart requests within each object upload.
+    /// Measured duration of the read workload.
     #[arg(
         long,
-        env = "OSP_MULTIPART_CONCURRENCY",
-        default_value_t = DEFAULT_MULTIPART_CONCURRENCY
+        env = "OSP_READ_DURATION",
+        default_value_t = DEFAULT_DURATION_SECONDS
     )]
-    pub multipart_concurrency: usize,
+    pub read_duration_seconds: u64,
+
+    /// Measured duration of the write workload.
+    #[arg(
+        long,
+        env = "OSP_WRITE_DURATION",
+        default_value_t = DEFAULT_DURATION_SECONDS
+    )]
+    pub write_duration_seconds: u64,
+
+    /// Measured duration of the stat workload.
+    #[arg(
+        long,
+        env = "OSP_STAT_DURATION",
+        default_value_t = DEFAULT_DURATION_SECONDS
+    )]
+    pub stat_duration_seconds: u64,
+
+    /// Maximum number of in-flight range-read requests.
+    #[arg(
+        long,
+        env = "OSP_READ_CONCURRENCY",
+        default_value_t = DEFAULT_IO_CONCURRENCY
+    )]
+    pub read_concurrency: usize,
+
+    /// Maximum number of in-flight multipart part-write requests.
+    #[arg(
+        long,
+        env = "OSP_WRITE_CONCURRENCY",
+        default_value_t = DEFAULT_IO_CONCURRENCY
+    )]
+    pub write_concurrency: usize,
+
+    /// Maximum number of in-flight stat requests.
+    #[arg(
+        long,
+        env = "OSP_STAT_CONCURRENCY",
+        default_value_t = DEFAULT_STAT_CONCURRENCY
+    )]
+    pub stat_concurrency: usize,
 
     /// Retain all objects created by the benchmark.
     #[arg(long, env = "OSP_KEEP_OBJECTS", default_value_t = false)]
@@ -72,12 +130,18 @@ pub struct StorageConfig {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub prefix: String,
+    pub retry_max_times: usize,
+    pub timeout_seconds: u64,
+    pub io_timeout_seconds: u64,
 }
 
 pub struct BenchmarkConfig {
-    pub duration_seconds: u64,
-    pub concurrency: usize,
-    pub multipart_concurrency: usize,
+    pub read_duration_seconds: u64,
+    pub write_duration_seconds: u64,
+    pub stat_duration_seconds: u64,
+    pub read_concurrency: usize,
+    pub write_concurrency: usize,
+    pub stat_concurrency: usize,
     pub keep_objects: bool,
 }
 
@@ -99,6 +163,12 @@ impl TryFrom<StorageArgs> for StorageConfig {
         if prefix.is_empty() {
             bail!("prefix cannot be empty");
         }
+        if args.retry_max_times == 0 {
+            bail!("retry max times must be greater than zero");
+        }
+        if args.timeout_seconds == 0 || args.io_timeout_seconds == 0 {
+            bail!("storage timeouts must be greater than zero");
+        }
 
         Ok(Self {
             endpoint,
@@ -107,6 +177,9 @@ impl TryFrom<StorageArgs> for StorageConfig {
             access_key_id,
             secret_access_key,
             prefix,
+            retry_max_times: args.retry_max_times,
+            timeout_seconds: args.timeout_seconds,
+            io_timeout_seconds: args.io_timeout_seconds,
         })
     }
 }
@@ -115,20 +188,23 @@ impl TryFrom<BenchmarkArgs> for BenchmarkConfig {
     type Error = anyhow::Error;
 
     fn try_from(args: BenchmarkArgs) -> Result<Self> {
-        if args.duration_seconds == 0 {
-            bail!("duration must be greater than zero");
+        if args.read_duration_seconds == 0
+            || args.write_duration_seconds == 0
+            || args.stat_duration_seconds == 0
+        {
+            bail!("workload durations must be greater than zero");
         }
-        if args.concurrency == 0 {
-            bail!("concurrency must be greater than zero");
-        }
-        if args.multipart_concurrency == 0 {
-            bail!("multipart concurrency must be greater than zero");
+        if args.read_concurrency == 0 || args.write_concurrency == 0 || args.stat_concurrency == 0 {
+            bail!("workload concurrency values must be greater than zero");
         }
 
         Ok(Self {
-            duration_seconds: args.duration_seconds,
-            concurrency: args.concurrency,
-            multipart_concurrency: args.multipart_concurrency,
+            read_duration_seconds: args.read_duration_seconds,
+            write_duration_seconds: args.write_duration_seconds,
+            stat_duration_seconds: args.stat_duration_seconds,
+            read_concurrency: args.read_concurrency,
+            write_concurrency: args.write_concurrency,
+            stat_concurrency: args.stat_concurrency,
             keep_objects: args.keep_objects,
         })
     }
