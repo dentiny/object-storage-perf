@@ -10,6 +10,11 @@ tag="${IMAGE_TAG:-local-$(date -u +%Y%m%d%H%M%S)}"
 image="${repository}:${tag}"
 context="$(mktemp -d)"
 trap 'rm -rf "$context"' EXIT
+zig_ar="$context/x86_64-unknown-linux-musl-ar"
+
+# Host ar cannot archive Linux objects when cross-compiling on macOS.
+printf '%s\n' '#!/bin/sh' 'exec zig ar "$@"' >"$zig_ar"
+chmod +x "$zig_ar"
 
 if [[ -z "$rustup_bin" || ! -x "$rustup_bin" ]]; then
   echo "rustup is required; install it with: brew install rustup" >&2
@@ -31,7 +36,7 @@ fi
 cd "$root"
 rustc_bin="$("$rustup_bin" which rustc --toolchain "$toolchain")"
 CARGO_TARGET_DIR="$root/target" \
-  PATH="$HOME/.cargo/bin:$PATH" \
+  PATH="$context:$HOME/.cargo/bin:$PATH" \
   RUSTC="$rustc_bin" \
   "$rustup_bin" run "$toolchain" \
   cargo zigbuild --target "$target" --release --locked

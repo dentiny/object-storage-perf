@@ -4,7 +4,8 @@ use clap::Args;
 const DEFAULT_REGION: &str = "us-east-1";
 const DEFAULT_PREFIX: &str = "object-storage-perf";
 const DEFAULT_DURATION_SECONDS: u64 = 10;
-const DEFAULT_IO_CONCURRENCY: usize = 128;
+const DEFAULT_READ_CONCURRENCY: usize = 64;
+const DEFAULT_WRITE_CONCURRENCY: usize = 128;
 const DEFAULT_STAT_CONCURRENCY: usize = 4;
 const DEFAULT_RETRY_MAX_TIMES: usize = 3;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
@@ -98,7 +99,7 @@ pub struct BenchmarkArgs {
     #[arg(
         long,
         env = "OSP_READ_CONCURRENCY",
-        default_value_t = DEFAULT_IO_CONCURRENCY
+        default_value_t = DEFAULT_READ_CONCURRENCY
     )]
     pub read_concurrency: usize,
 
@@ -106,7 +107,7 @@ pub struct BenchmarkArgs {
     #[arg(
         long,
         env = "OSP_WRITE_CONCURRENCY",
-        default_value_t = DEFAULT_IO_CONCURRENCY
+        default_value_t = DEFAULT_WRITE_CONCURRENCY
     )]
     pub write_concurrency: usize,
 

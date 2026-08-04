@@ -16,10 +16,15 @@ spec:
       nodeSelector:
         kubernetes.io/arch: amd64
         node.kubernetes.io/instance-type: __NODE_TYPE__
+        object-storage-perf/dedicated: "true"
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal
           value: present
+          effect: NoSchedule
+        - key: object-storage-perf/dedicated
+          operator: Equal
+          value: "true"
           effect: NoSchedule
       imagePullSecrets:
         - name: __IMAGE_PULL_SECRET__
@@ -28,6 +33,8 @@ spec:
           image: __BENCHMARK_IMAGE__
           imagePullPolicy: IfNotPresent
           env:
+            - name: TOKIO_WORKER_THREADS
+              value: "64"
             - name: OSP_ENDPOINT
               value: __OSP_ENDPOINT__
             - name: OSP_BUCKET
@@ -66,10 +73,10 @@ spec:
                   key: secret-access-key
           resources:
             requests:
-              cpu: "4"
+              cpu: "64"
               memory: 8Gi
             limits:
-              cpu: "4"
+              cpu: "64"
               memory: 8Gi
           securityContext:
             allowPrivilegeEscalation: false

@@ -4,12 +4,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use tokio::{sync::Semaphore, task::JoinSet};
+use tokio::{sync::Semaphore, task::JoinSet, time::Instant as TokioInstant};
 
 use super::{BenchmarkSuite, OBJECT_SIZE, READ_SIZE, write::upload_object};
 use crate::{
     metrics::{BenchmarkReport, MetricsRecorder},
-    utils::{MeasurementWindow, before_deadline, join_workers},
+    utils::{MeasurementWindow, join_workers},
 };
 
 impl BenchmarkSuite {
@@ -52,39 +52,34 @@ impl BenchmarkSuite {
             self.config.read_duration_seconds,
         )));
         let deadline = measurement.deadline();
-        let read_requests = Arc::new(Semaphore::new(self.config.read_concurrency));
         let mut workers = JoinSet::new();
 
         for worker_id in 0..self.config.read_concurrency {
             let operator = self.operator.clone();
             let recorder = Arc::clone(&recorder);
             let paths = Arc::clone(&paths);
-            let read_requests = Arc::clone(&read_requests);
             let measurement = Arc::clone(&measurement);
             let concurrency = self.config.read_concurrency as u64;
 
             workers.spawn(async move {
                 let path = &paths[worker_id % paths.len()];
+                let reader = match operator.reader(path).await {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        recorder.record_error(&anyhow::Error::from(error));
+                        return;
+                    }
+                };
                 let mut block = worker_id as u64;
                 loop {
+                    if TokioInstant::now() >= deadline {
+                        break;
+                    }
                     let offset = (block % (OBJECT_SIZE / READ_SIZE)) * READ_SIZE;
                     block += concurrency;
-                    let Some(permit) =
-                        before_deadline(deadline, Arc::clone(&read_requests).acquire_owned()).await
-                    else {
-                        break;
-                    };
-                    let Ok(permit) = permit else {
-                        recorder.record_error(&anyhow!("read semaphore closed"));
-                        break;
-                    };
                     let operation_started = Instant::now();
-                    let result = operator
-                        .read_with(path)
-                        .range(offset..offset + READ_SIZE)
-                        .await;
+                    let result = reader.read(offset..offset + READ_SIZE).await;
                     measurement.record_completion();
-                    drop(permit);
                     let result = result.map_err(anyhow::Error::from).and_then(|buffer| {
                         if buffer.len() as u64 == READ_SIZE {
                             Ok(())

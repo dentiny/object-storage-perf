@@ -1,7 +1,7 @@
 # object-storage-perf
 
 A Rust and [Apache OpenDAL](https://opendal.apache.org/) benchmark suite for
-S3-compatible object storage. It runs 2 MiB range reads, 512 MiB multipart
+S3-compatible object storage. It runs 10 MiB range reads, 512 MiB multipart
 writes, and object stat requests, then prints a rough latency and throughput
 report.
 
@@ -30,12 +30,13 @@ cargo run --release
 ```
 
 Each workload starts requests for 10 seconds by default, then lets requests
-already in flight finish. Read and multipart part-write limits default to 128
-in-flight requests; stat defaults to four. Tune them to find the backend limit:
+already in flight finish. Read concurrency defaults to 64, multipart part-write
+concurrency defaults to 128, and stat defaults to four. Tune them to find the
+backend limit:
 
 ```console
 cargo run --release -- \
-  --read-concurrency 128 \
+  --read-concurrency 64 \
   --write-concurrency 128 \
   --stat-concurrency 24 \
   --read-duration-seconds 30 \
@@ -65,7 +66,7 @@ will emit a warning.
 The measured phases use:
 
 - Object size: 512 MiB
-- Read size: 2 MiB, aligned within the source object
+- Read size: 10 MiB, aligned within the source object
 - Multipart upload part size: 10 MiB, with a final 2 MiB part
 - Read throughput: successful bytes divided by measured wall time
 - Write throughput: successfully completed multipart part bytes divided by
@@ -86,7 +87,9 @@ are excluded from that time. Use
 ## Run on OKE
 
 OKE workers are Linux/AMD64. On an Apple Silicon workstation, cross-compile a
-static AMD64 binary locally with Zig, then let Docker package only that binary:
+static AMD64 binary locally with Zig, then let Docker package only that binary.
+The benchmark uses jemalloc to avoid allocator-induced `mmap` contention while
+processing many network buffers concurrently:
 
 ```console
 brew install zig rustup docker-buildx
@@ -122,8 +125,17 @@ kubectl -n default create secret generic object-storage-perf-s3 \
   --from-literal=secret-access-key="$OSP_SECRET_ACCESS_KEY"
 ```
 
-The Job expects an OCIR pull Secret named `ocir-secret`. Deploy the immutable
-image and follow its report:
+The Job expects an OCIR pull Secret named `ocir-secret` and a dedicated
+benchmark node. Label and taint that node so ordinary workloads cannot schedule
+there:
+
+```console
+kubectl label node <node-name> object-storage-perf/dedicated=true
+kubectl taint node <node-name> object-storage-perf/dedicated=true:NoSchedule
+```
+
+System DaemonSets remain on the node. Deploy the immutable image and follow its
+report:
 
 ```console
 BENCHMARK_IMAGE=phx.ocir.io/axnzj5nsewcd/object-storage-perf:benchmark-001 \
@@ -133,7 +145,7 @@ OSP_REGION=us-phoenix-1 \
 OSP_READ_DURATION=120 \
 OSP_WRITE_DURATION=120 \
 OSP_STAT_DURATION=30 \
-OSP_READ_CONCURRENCY=128 \
+OSP_READ_CONCURRENCY=64 \
 OSP_WRITE_CONCURRENCY=128 \
 OSP_STAT_CONCURRENCY=24 \
 bash k8s/deploy-job.sh
