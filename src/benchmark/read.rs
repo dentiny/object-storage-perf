@@ -4,12 +4,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use tokio::{sync::Semaphore, task::JoinSet, time::Instant as TokioInstant};
+use tokio::{sync::Semaphore, task::JoinSet};
 
 use super::{BenchmarkSuite, OBJECT_SIZE, READ_SIZE, write::upload_object};
 use crate::{
     metrics::{BenchmarkReport, MetricsRecorder},
-    utils::{before_deadline, join_workers},
+    utils::{MeasurementWindow, before_deadline, join_workers},
 };
 
 impl BenchmarkSuite {
@@ -31,6 +31,7 @@ impl BenchmarkSuite {
                     &full_part,
                     &final_part,
                     /*deadline=*/ None,
+                    /*metrics=*/ None,
                 )
                 .await
                 .with_context(|| format!("failed to prepare read source object {path:?}"))?;
@@ -47,8 +48,10 @@ impl BenchmarkSuite {
     pub(super) async fn run_read(&self, paths: Vec<String>) -> Result<BenchmarkReport> {
         let recorder = Arc::new(MetricsRecorder::default());
         let paths = Arc::new(paths);
-        let elapsed = Duration::from_secs(self.config.read_duration_seconds);
-        let deadline = TokioInstant::now() + elapsed;
+        let measurement = Arc::new(MeasurementWindow::new(Duration::from_secs(
+            self.config.read_duration_seconds,
+        )));
+        let deadline = measurement.deadline();
         let read_requests = Arc::new(Semaphore::new(self.config.read_concurrency));
         let mut workers = JoinSet::new();
 
@@ -57,6 +60,7 @@ impl BenchmarkSuite {
             let recorder = Arc::clone(&recorder);
             let paths = Arc::clone(&paths);
             let read_requests = Arc::clone(&read_requests);
+            let measurement = Arc::clone(&measurement);
             let concurrency = self.config.read_concurrency as u64;
 
             workers.spawn(async move {
@@ -75,16 +79,11 @@ impl BenchmarkSuite {
                         break;
                     };
                     let operation_started = Instant::now();
-                    let Some(result) = before_deadline(deadline, async {
-                        operator
-                            .read_with(path)
-                            .range(offset..offset + READ_SIZE)
-                            .await
-                    })
-                    .await
-                    else {
-                        break;
-                    };
+                    let result = operator
+                        .read_with(path)
+                        .range(offset..offset + READ_SIZE)
+                        .await;
+                    measurement.record_completion();
                     drop(permit);
                     let result = result.map_err(anyhow::Error::from).and_then(|buffer| {
                         if buffer.len() as u64 == READ_SIZE {
@@ -108,6 +107,6 @@ impl BenchmarkSuite {
         }
 
         join_workers(&mut workers, "read").await?;
-        Ok(recorder.report("read", elapsed))
+        Ok(recorder.report("read", measurement.elapsed()))
     }
 }

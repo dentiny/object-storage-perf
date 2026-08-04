@@ -1,4 +1,8 @@
-use std::future::Future;
+use std::{
+    future::Future,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use opendal::Buffer;
@@ -24,6 +28,37 @@ where
     }
 }
 
+pub(crate) struct MeasurementWindow {
+    started: Instant,
+    requested: Duration,
+    last_completion_nanos: AtomicU64,
+}
+
+impl MeasurementWindow {
+    pub(crate) fn new(requested: Duration) -> Self {
+        Self {
+            started: Instant::now(),
+            requested,
+            last_completion_nanos: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn deadline(&self) -> Instant {
+        self.started + self.requested
+    }
+
+    pub(crate) fn record_completion(&self) {
+        self.last_completion_nanos
+            .fetch_max(duration_nanos(self.started.elapsed()), Ordering::SeqCst);
+    }
+
+    pub(crate) fn elapsed(&self) -> Duration {
+        self.requested.max(Duration::from_nanos(
+            self.last_completion_nanos.load(Ordering::SeqCst),
+        ))
+    }
+}
+
 pub(crate) async fn join_workers(workers: &mut JoinSet<()>, workload: &str) -> Result<()> {
     while let Some(result) = workers.join_next().await {
         result.with_context(|| format!("{workload} benchmark worker failed"))?;
@@ -33,4 +68,8 @@ pub(crate) async fn join_workers(workers: &mut JoinSet<()>, workload: &str) -> R
 
 pub(crate) fn zero_buffer(length: usize) -> Buffer {
     Buffer::from(vec![0_u8; length])
+}
+
+fn duration_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().min(u64::MAX as u128) as u64
 }

@@ -124,8 +124,8 @@ impl Default for MetricsRecorder {
 
 impl MetricsRecorder {
     pub(crate) fn record_success(&self, duration: Duration, bytes: u64) {
-        self.successes.fetch_add(1, Ordering::Relaxed);
-        self.bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.successes.fetch_add(1, Ordering::SeqCst);
+        self.bytes.fetch_add(bytes, Ordering::SeqCst);
         self.latency
             .lock()
             .unwrap()
@@ -133,7 +133,7 @@ impl MetricsRecorder {
     }
 
     pub(crate) fn record_error(&self, error: &anyhow::Error) {
-        self.errors.fetch_add(1, Ordering::Relaxed);
+        self.errors.fetch_add(1, Ordering::SeqCst);
         let category = error_category(error);
         *self
             .error_categories
@@ -153,9 +153,9 @@ impl MetricsRecorder {
         BenchmarkReport {
             workload,
             elapsed,
-            successes: self.successes.load(Ordering::Relaxed),
-            errors: self.errors.load(Ordering::Relaxed),
-            bytes: self.bytes.load(Ordering::Relaxed),
+            successes: self.successes.load(Ordering::SeqCst),
+            errors: self.errors.load(Ordering::SeqCst),
+            bytes: self.bytes.load(Ordering::SeqCst),
             mean_latency_nanos: latency.mean(),
             p50_latency_nanos: latency.value_at_quantile(0.50),
             p95_latency_nanos: latency.value_at_quantile(0.95),
