@@ -29,9 +29,9 @@ Run all three workloads:
 cargo run --release
 ```
 
-Each workload runs for 10 seconds by default. Read and multipart part-write
-limits default to 128 in-flight requests; stat defaults to four. Tune them to
-find the backend limit:
+Each workload starts requests for 10 seconds by default, then lets requests
+already in flight finish. Read and multipart part-write limits default to 128
+in-flight requests; stat defaults to four. Tune them to find the backend limit:
 
 ```console
 cargo run --release -- \
@@ -68,17 +68,19 @@ The measured phases use:
 - Read size: 2 MiB, aligned within the source object
 - Multipart upload part size: 10 MiB, with a final 2 MiB part
 - Read throughput: successful bytes divided by measured wall time
-- Write throughput: successfully completed object bytes divided by measured
-  wall time
+- Write throughput: successfully completed multipart part bytes divided by
+  measured wall time
 - Stat throughput: successful operations divided by measured wall time
-- Latency: HDR histogram mean, p50, p95, and p99 for successful operations
+- Latency: HDR histogram mean, p50, p95, and p99 for successful reads,
+  multipart part writes, and stat operations
 - Reliability: success rate and final error counts grouped by OpenDAL error kind
 
 The source-object preparation and final cleanup are outside measured phases.
-At the duration deadline, in-flight reads and stat requests are canceled and
-no new multipart parts begin. An in-flight part finishes before its valid
-writer is aborted, so multipart abort and final cleanup can add a small amount
-of wall time after measurement stops. Use
+The configured duration is the request-start window: after its deadline, no
+new measured operations begin, while operations already in flight finish or
+reach their configured timeout. Measured wall time extends through the last
+completed in-flight operation. Multipart completion, abort, and final cleanup
+are excluded from that time. Use
 `cargo run -- --help` for all flags and environment variables.
 
 ## Run on OKE

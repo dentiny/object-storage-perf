@@ -11,7 +11,7 @@ use crate::{
     config::BenchmarkConfig,
     metrics::{BenchmarkReport, MetricsRecorder},
     storage::Storage,
-    utils::{before_deadline, join_workers, maybe_before_deadline, zero_buffer},
+    utils::{MeasurementWindow, before_deadline, join_workers, maybe_before_deadline, zero_buffer},
 };
 
 pub const MIB: u64 = 1024 * 1024;
@@ -100,6 +100,7 @@ impl BenchmarkSuite {
                     &full_part,
                     &final_part,
                     /*deadline=*/ None,
+                    /*metrics=*/ None,
                 )
                 .await
                 .with_context(|| format!("failed to prepare read source object {path:?}"))?;
@@ -116,8 +117,10 @@ impl BenchmarkSuite {
     async fn run_read(&self, paths: Vec<String>) -> Result<BenchmarkReport> {
         let recorder = Arc::new(MetricsRecorder::default());
         let paths = Arc::new(paths);
-        let elapsed = Duration::from_secs(self.config.read_duration_seconds);
-        let deadline = TokioInstant::now() + elapsed;
+        let measurement = Arc::new(MeasurementWindow::new(Duration::from_secs(
+            self.config.read_duration_seconds,
+        )));
+        let deadline = measurement.deadline();
         let read_requests = Arc::new(Semaphore::new(self.config.read_concurrency));
         let mut workers = JoinSet::new();
 
@@ -126,6 +129,7 @@ impl BenchmarkSuite {
             let recorder = Arc::clone(&recorder);
             let paths = Arc::clone(&paths);
             let read_requests = Arc::clone(&read_requests);
+            let measurement = Arc::clone(&measurement);
             let concurrency = self.config.read_concurrency as u64;
 
             workers.spawn(async move {
@@ -144,16 +148,11 @@ impl BenchmarkSuite {
                         break;
                     };
                     let operation_started = Instant::now();
-                    let Some(result) = before_deadline(deadline, async {
-                        operator
-                            .read_with(path)
-                            .range(offset..offset + READ_SIZE)
-                            .await
-                    })
-                    .await
-                    else {
-                        break;
-                    };
+                    let result = operator
+                        .read_with(path)
+                        .range(offset..offset + READ_SIZE)
+                        .await;
+                    measurement.record_completion();
                     drop(permit);
                     let result = result.map_err(anyhow::Error::from).and_then(|buffer| {
                         if buffer.len() as u64 == READ_SIZE {
@@ -177,14 +176,16 @@ impl BenchmarkSuite {
         }
 
         join_workers(&mut workers, "read").await?;
-        Ok(recorder.report("read", elapsed))
+        Ok(recorder.report("read", measurement.elapsed()))
     }
 
     async fn run_write(&self, run_prefix: &str) -> Result<BenchmarkReport> {
         let recorder = Arc::new(MetricsRecorder::default());
         let run_prefix = Arc::new(run_prefix.to_owned());
-        let elapsed = Duration::from_secs(self.config.write_duration_seconds);
-        let deadline = TokioInstant::now() + elapsed;
+        let measurement = Arc::new(MeasurementWindow::new(Duration::from_secs(
+            self.config.write_duration_seconds,
+        )));
+        let deadline = measurement.deadline();
         let part_writes = Arc::new(Semaphore::new(self.config.write_concurrency));
         let mut workers = JoinSet::new();
 
@@ -195,6 +196,7 @@ impl BenchmarkSuite {
             let full_part = self.full_part.clone();
             let final_part = self.final_part.clone();
             let part_writes = Arc::clone(&part_writes);
+            let measurement = Arc::clone(&measurement);
 
             workers.spawn(async move {
                 let mut sequence = 0_u64;
@@ -205,7 +207,6 @@ impl BenchmarkSuite {
                         run_prefix.as_str()
                     );
                     sequence += 1;
-                    let operation_started = Instant::now();
                     let result = upload_object(
                         &operator,
                         &path,
@@ -213,13 +214,12 @@ impl BenchmarkSuite {
                         &full_part,
                         &final_part,
                         Some(deadline),
+                        Some((&recorder, &measurement)),
                     )
                     .await;
 
                     match result {
-                        Ok(true) => {
-                            recorder.record_success(operation_started.elapsed(), OBJECT_SIZE);
-                        }
+                        Ok(true) => {}
                         Ok(false) => break,
                         Err(error) => recorder.record_error(&error),
                     }
@@ -228,29 +228,32 @@ impl BenchmarkSuite {
         }
 
         join_workers(&mut workers, "write").await?;
-        Ok(recorder.report("write", elapsed))
+        Ok(recorder.report("write", measurement.elapsed()))
     }
 
     async fn run_stat(&self, path: &str) -> Result<BenchmarkReport> {
         let recorder = Arc::new(MetricsRecorder::default());
         let path = Arc::new(path.to_owned());
-        let elapsed = Duration::from_secs(self.config.stat_duration_seconds);
-        let deadline = TokioInstant::now() + elapsed;
+        let measurement = Arc::new(MeasurementWindow::new(Duration::from_secs(
+            self.config.stat_duration_seconds,
+        )));
+        let deadline = measurement.deadline();
         let mut workers = JoinSet::new();
 
         for _ in 0..self.config.stat_concurrency {
             let operator = self.operator.clone();
             let recorder = Arc::clone(&recorder);
             let path = Arc::clone(&path);
+            let measurement = Arc::clone(&measurement);
 
             workers.spawn(async move {
                 loop {
-                    let operation_started = Instant::now();
-                    let Some(result) =
-                        before_deadline(deadline, operator.stat(path.as_str())).await
-                    else {
+                    if TokioInstant::now() >= deadline {
                         break;
-                    };
+                    }
+                    let operation_started = Instant::now();
+                    let result = operator.stat(path.as_str()).await;
+                    measurement.record_completion();
                     let result = result.map_err(anyhow::Error::from).and_then(|metadata| {
                         if metadata.content_length() == OBJECT_SIZE {
                             Ok(())
@@ -273,7 +276,7 @@ impl BenchmarkSuite {
         }
 
         join_workers(&mut workers, "stat").await?;
-        Ok(recorder.report("stat", elapsed))
+        Ok(recorder.report("stat", measurement.elapsed()))
     }
 
     async fn cleanup(&self, run_prefix: &str) -> Result<()> {
@@ -294,17 +297,15 @@ async fn upload_object(
     full_part: &Buffer,
     final_part: &Buffer,
     deadline: Option<TokioInstant>,
+    metrics: Option<(&MetricsRecorder, &MeasurementWindow)>,
 ) -> Result<bool> {
-    let Some(writer) = maybe_before_deadline(deadline, async {
-        operator
-            .writer_with(path)
-            .chunk(MULTIPART_PART_SIZE as usize)
-            .await
-    })
-    .await
-    else {
+    if deadline.is_some_and(|deadline| TokioInstant::now() >= deadline) {
         return Ok(false);
-    };
+    }
+    let writer = operator
+        .writer_with(path)
+        .chunk(MULTIPART_PART_SIZE as usize)
+        .await;
     let mut writer =
         writer.with_context(|| format!("failed to start multipart upload for {path:?}"))?;
 
@@ -319,7 +320,14 @@ async fn upload_object(
             return Ok(false);
         };
         let permit = permit.context("part-write semaphore closed")?;
+        let operation_started = Instant::now();
         let result = writer.write(full_part.clone()).await;
+        if let Some((recorder, measurement)) = metrics {
+            measurement.record_completion();
+            if result.is_ok() {
+                recorder.record_success(operation_started.elapsed(), full_part.len() as u64);
+            }
+        }
         drop(permit);
         if let Err(error) = result {
             let _ = writer.abort().await;
@@ -338,7 +346,14 @@ async fn upload_object(
             return Ok(false);
         };
         let permit = permit.context("part-write semaphore closed")?;
+        let operation_started = Instant::now();
         let result = writer.write(final_part.clone()).await;
+        if let Some((recorder, measurement)) = metrics {
+            measurement.record_completion();
+            if result.is_ok() {
+                recorder.record_success(operation_started.elapsed(), final_part.len() as u64);
+            }
+        }
         drop(permit);
         if let Err(error) = result {
             let _ = writer.abort().await;
