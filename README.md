@@ -29,20 +29,29 @@ Run all three workloads:
 cargo run --release
 ```
 
-Each workload runs for 10 seconds with four concurrent logical operations by
-default. Tune concurrency and duration to find the backend limit:
+Each workload runs for 10 seconds by default. Read and multipart part-write
+limits default to 128 in-flight requests; stat defaults to four. Tune them to
+find the backend limit:
 
 ```console
 cargo run --release -- \
-  --concurrency 16 \
-  --duration-seconds 30 \
-  --multipart-concurrency 2
+  --read-concurrency 128 \
+  --write-concurrency 128 \
+  --stat-concurrency 24 \
+  --read-duration-seconds 30 \
+  --write-duration-seconds 30 \
+  --stat-duration-seconds 30
 ```
 
-`--concurrency` controls simultaneous read, write, or stat operations.
-`--multipart-concurrency` controls simultaneous part requests inside each
-512 MiB upload, so the write phase can issue up to the product of those two
-settings in parallel.
+`--read-concurrency` limits range reads currently in progress.
+`--write-concurrency` is one global limit across multipart part writes; it is
+not multiplied by the number of object uploads. `--stat-concurrency` limits
+stat requests.
+
+OpenDAL retries temporary failures up to three times with jittered backoff.
+Control-operation and per-I/O-attempt timeouts default to 30 seconds. Configure
+them with `OSP_RETRY_MAX_TIMES`, `OSP_TIMEOUT_SECONDS`, and
+`OSP_IO_TIMEOUT_SECONDS`.
 
 Every write operation uses a new object path. The suite also creates one
 512 MiB source object for read and stat. It attempts to delete all created
@@ -60,6 +69,7 @@ The measured phases use:
   wall time
 - Stat throughput: successful operations divided by measured wall time
 - Latency: HDR histogram mean, p50, p95, and p99 for successful operations
+- Reliability: success rate and final error counts grouped by OpenDAL error kind
 
 The source-object preparation and final cleanup are outside measured phases.
 At the duration deadline, in-flight reads and stat requests are canceled and
@@ -114,12 +124,16 @@ BENCHMARK_IMAGE=phx.ocir.io/axnzj5nsewcd/object-storage-perf:benchmark-001 \
 OSP_ENDPOINT=https://axnzj5nsewcd.compat.objectstorage.us-phoenix-1.oraclecloud.com \
 OSP_BUCKET=my-benchmark-bucket \
 OSP_REGION=us-phoenix-1 \
-OSP_DURATION=30 \
-OSP_CONCURRENCY=16 \
+OSP_READ_DURATION=120 \
+OSP_WRITE_DURATION=120 \
+OSP_STAT_DURATION=30 \
+OSP_READ_CONCURRENCY=128 \
+OSP_WRITE_CONCURRENCY=128 \
+OSP_STAT_CONCURRENCY=24 \
 bash k8s/deploy-job.sh
 
 kubectl -n default logs -f job/object-storage-perf
 ```
 
-Use `NAMESPACE`, `S3_SECRET`, or `IMAGE_PULL_SECRET` to override the Kubernetes
-defaults. Neither the image build nor the Kubernetes Job compiles Rust.
+Use `NAMESPACE` or `IMAGE_PULL_SECRET` to override the Kubernetes defaults.
+Neither the image build nor the Kubernetes Job compiles Rust.

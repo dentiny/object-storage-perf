@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use opendal::{Buffer, Operator};
-use tokio::{task::JoinSet, time::Instant as TokioInstant};
+use tokio::{sync::Semaphore, task::JoinSet, time::Instant as TokioInstant};
 
 use crate::{
     config::BenchmarkConfig,
@@ -46,7 +46,7 @@ impl BenchmarkSuite {
         upload_object(
             &self.operator,
             &source_path,
-            self.config.multipart_concurrency,
+            &Arc::new(Semaphore::new(self.config.write_concurrency)),
             &self.full_part,
             &self.final_part,
             /*deadline=*/ None,
@@ -56,19 +56,19 @@ impl BenchmarkSuite {
 
         eprintln!(
             "running read workload for {}s at concurrency {}...",
-            self.config.duration_seconds, self.config.concurrency
+            self.config.read_duration_seconds, self.config.read_concurrency
         );
         let read = self.run_read(&source_path).await?;
 
         eprintln!(
             "running write workload for {}s at concurrency {}...",
-            self.config.duration_seconds, self.config.concurrency
+            self.config.write_duration_seconds, self.config.write_concurrency
         );
         let write = self.run_write(&run_prefix).await?;
 
         eprintln!(
             "running stat workload for {}s at concurrency {}...",
-            self.config.duration_seconds, self.config.concurrency
+            self.config.stat_duration_seconds, self.config.stat_concurrency
         );
         let stat = self.run_stat(&source_path).await?;
 
@@ -87,22 +87,32 @@ impl BenchmarkSuite {
     async fn run_read(&self, path: &str) -> Result<BenchmarkReport> {
         let recorder = Arc::new(MetricsRecorder::default());
         let path = Arc::new(path.to_owned());
-        let elapsed = Duration::from_secs(self.config.duration_seconds);
+        let elapsed = Duration::from_secs(self.config.read_duration_seconds);
         let deadline = TokioInstant::now() + elapsed;
+        let read_requests = Arc::new(Semaphore::new(self.config.read_concurrency));
         let mut workers = JoinSet::new();
 
-        for worker_id in 0..self.config.concurrency {
+        for worker_id in 0..self.config.read_concurrency {
             let operator = self.operator.clone();
             let recorder = Arc::clone(&recorder);
             let path = Arc::clone(&path);
-            let concurrency = self.config.concurrency as u64;
+            let read_requests = Arc::clone(&read_requests);
+            let concurrency = self.config.read_concurrency as u64;
 
             workers.spawn(async move {
                 let mut block = worker_id as u64;
-                let mut latency = recorder.latency_recorder();
                 loop {
                     let offset = (block % (OBJECT_SIZE / READ_SIZE)) * READ_SIZE;
                     block += concurrency;
+                    let Some(permit) =
+                        before_deadline(deadline, Arc::clone(&read_requests).acquire_owned()).await
+                    else {
+                        break;
+                    };
+                    let Ok(permit) = permit else {
+                        recorder.record_error(&anyhow!("read semaphore closed"));
+                        break;
+                    };
                     let operation_started = Instant::now();
                     let Some(result) = before_deadline(deadline, async {
                         operator
@@ -114,6 +124,7 @@ impl BenchmarkSuite {
                     else {
                         break;
                     };
+                    drop(permit);
                     let result = result.map_err(anyhow::Error::from).and_then(|buffer| {
                         if buffer.len() as u64 == READ_SIZE {
                             Ok(())
@@ -127,11 +138,7 @@ impl BenchmarkSuite {
 
                     match result {
                         Ok(()) => {
-                            recorder.record_success(
-                                &mut latency,
-                                operation_started.elapsed(),
-                                READ_SIZE,
-                            );
+                            recorder.record_success(operation_started.elapsed(), READ_SIZE);
                         }
                         Err(error) => recorder.record_error(&error),
                     }
@@ -146,21 +153,21 @@ impl BenchmarkSuite {
     async fn run_write(&self, run_prefix: &str) -> Result<BenchmarkReport> {
         let recorder = Arc::new(MetricsRecorder::default());
         let run_prefix = Arc::new(run_prefix.to_owned());
-        let elapsed = Duration::from_secs(self.config.duration_seconds);
+        let elapsed = Duration::from_secs(self.config.write_duration_seconds);
         let deadline = TokioInstant::now() + elapsed;
+        let part_writes = Arc::new(Semaphore::new(self.config.write_concurrency));
         let mut workers = JoinSet::new();
 
-        for worker_id in 0..self.config.concurrency {
+        for worker_id in 0..self.config.write_concurrency {
             let operator = self.operator.clone();
             let recorder = Arc::clone(&recorder);
             let run_prefix = Arc::clone(&run_prefix);
             let full_part = self.full_part.clone();
             let final_part = self.final_part.clone();
-            let multipart_concurrency = self.config.multipart_concurrency;
+            let part_writes = Arc::clone(&part_writes);
 
             workers.spawn(async move {
                 let mut sequence = 0_u64;
-                let mut latency = recorder.latency_recorder();
 
                 loop {
                     let path = format!(
@@ -172,7 +179,7 @@ impl BenchmarkSuite {
                     let result = upload_object(
                         &operator,
                         &path,
-                        multipart_concurrency,
+                        &part_writes,
                         &full_part,
                         &final_part,
                         Some(deadline),
@@ -181,11 +188,7 @@ impl BenchmarkSuite {
 
                     match result {
                         Ok(true) => {
-                            recorder.record_success(
-                                &mut latency,
-                                operation_started.elapsed(),
-                                OBJECT_SIZE,
-                            );
+                            recorder.record_success(operation_started.elapsed(), OBJECT_SIZE);
                         }
                         Ok(false) => break,
                         Err(error) => recorder.record_error(&error),
@@ -201,17 +204,16 @@ impl BenchmarkSuite {
     async fn run_stat(&self, path: &str) -> Result<BenchmarkReport> {
         let recorder = Arc::new(MetricsRecorder::default());
         let path = Arc::new(path.to_owned());
-        let elapsed = Duration::from_secs(self.config.duration_seconds);
+        let elapsed = Duration::from_secs(self.config.stat_duration_seconds);
         let deadline = TokioInstant::now() + elapsed;
         let mut workers = JoinSet::new();
 
-        for _ in 0..self.config.concurrency {
+        for _ in 0..self.config.stat_concurrency {
             let operator = self.operator.clone();
             let recorder = Arc::clone(&recorder);
             let path = Arc::clone(&path);
 
             workers.spawn(async move {
-                let mut latency = recorder.latency_recorder();
                 loop {
                     let operation_started = Instant::now();
                     let Some(result) =
@@ -232,7 +234,7 @@ impl BenchmarkSuite {
 
                     match result {
                         Ok(()) => {
-                            recorder.record_success(&mut latency, operation_started.elapsed(), 0);
+                            recorder.record_success(operation_started.elapsed(), 0);
                         }
                         Err(error) => recorder.record_error(&error),
                     }
@@ -258,7 +260,7 @@ impl BenchmarkSuite {
 async fn upload_object(
     operator: &Operator,
     path: &str,
-    multipart_concurrency: usize,
+    part_writes: &Arc<Semaphore>,
     full_part: &Buffer,
     final_part: &Buffer,
     deadline: Option<TokioInstant>,
@@ -267,7 +269,6 @@ async fn upload_object(
         operator
             .writer_with(path)
             .chunk(MULTIPART_PART_SIZE as usize)
-            .concurrent(multipart_concurrency)
             .await
     })
     .await
@@ -278,7 +279,8 @@ async fn upload_object(
         writer.with_context(|| format!("failed to start multipart upload for {path:?}"))?;
 
     for _ in 0..(OBJECT_SIZE / MULTIPART_PART_SIZE) {
-        let Some(result) = maybe_before_deadline(deadline, writer.write(full_part.clone())).await
+        let Some(permit) =
+            maybe_before_deadline(deadline, Arc::clone(part_writes).acquire_owned()).await
         else {
             writer
                 .abort()
@@ -286,6 +288,17 @@ async fn upload_object(
                 .with_context(|| format!("failed to abort timed-out upload for {path:?}"))?;
             return Ok(false);
         };
+        let permit = permit.context("part-write semaphore closed")?;
+        let Some(result) = maybe_before_deadline(deadline, writer.write(full_part.clone())).await
+        else {
+            drop(permit);
+            writer
+                .abort()
+                .await
+                .with_context(|| format!("failed to abort timed-out upload for {path:?}"))?;
+            return Ok(false);
+        };
+        drop(permit);
         if let Err(error) = result {
             let _ = writer.abort().await;
             return Err(error).with_context(|| format!("failed to upload part for {path:?}"));
@@ -293,7 +306,8 @@ async fn upload_object(
     }
 
     if !final_part.is_empty() {
-        let Some(result) = maybe_before_deadline(deadline, writer.write(final_part.clone())).await
+        let Some(permit) =
+            maybe_before_deadline(deadline, Arc::clone(part_writes).acquire_owned()).await
         else {
             writer
                 .abort()
@@ -301,6 +315,17 @@ async fn upload_object(
                 .with_context(|| format!("failed to abort timed-out upload for {path:?}"))?;
             return Ok(false);
         };
+        let permit = permit.context("part-write semaphore closed")?;
+        let Some(result) = maybe_before_deadline(deadline, writer.write(final_part.clone())).await
+        else {
+            drop(permit);
+            writer
+                .abort()
+                .await
+                .with_context(|| format!("failed to abort timed-out upload for {path:?}"))?;
+            return Ok(false);
+        };
+        drop(permit);
         if let Err(error) = result {
             let _ = writer.abort().await;
             return Err(error).with_context(|| format!("failed to upload final part for {path:?}"));

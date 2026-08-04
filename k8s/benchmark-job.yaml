@@ -30,21 +30,33 @@ spec:
               value: __OSP_REGION__
             - name: OSP_PREFIX
               value: __OSP_PREFIX__
-            - name: OSP_DURATION
-              value: "__OSP_DURATION__"
-            - name: OSP_CONCURRENCY
-              value: "__OSP_CONCURRENCY__"
-            - name: OSP_MULTIPART_CONCURRENCY
-              value: "__OSP_MULTIPART_CONCURRENCY__"
+            - name: OSP_READ_DURATION
+              value: "__OSP_READ_DURATION__"
+            - name: OSP_WRITE_DURATION
+              value: "__OSP_WRITE_DURATION__"
+            - name: OSP_STAT_DURATION
+              value: "__OSP_STAT_DURATION__"
+            - name: OSP_READ_CONCURRENCY
+              value: "__OSP_READ_CONCURRENCY__"
+            - name: OSP_WRITE_CONCURRENCY
+              value: "__OSP_WRITE_CONCURRENCY__"
+            - name: OSP_STAT_CONCURRENCY
+              value: "__OSP_STAT_CONCURRENCY__"
+            - name: OSP_RETRY_MAX_TIMES
+              value: "__OSP_RETRY_MAX_TIMES__"
+            - name: OSP_TIMEOUT_SECONDS
+              value: "__OSP_TIMEOUT_SECONDS__"
+            - name: OSP_IO_TIMEOUT_SECONDS
+              value: "__OSP_IO_TIMEOUT_SECONDS__"
             - name: OSP_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: __S3_SECRET__
+                  name: object-storage-perf-s3
                   key: access-key-id
             - name: OSP_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: __S3_SECRET__
+                  name: object-storage-perf-s3
                   key: secret-access-key
           resources:
             requests:
@@ -57,6 +69,8 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
             capabilities:
               drop:
                 - ALL
