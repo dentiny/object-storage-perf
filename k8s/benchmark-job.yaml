@@ -15,6 +15,12 @@ spec:
       restartPolicy: Never
       nodeSelector:
         kubernetes.io/arch: amd64
+        node.kubernetes.io/instance-type: __NODE_TYPE__
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: present
+          effect: NoSchedule
       imagePullSecrets:
         - name: __IMAGE_PULL_SECRET__
       containers:
@@ -64,7 +70,7 @@ spec:
               memory: 128Mi
             limits:
               cpu: "4"
-              memory: 2Gi
+              memory: 8Gi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -40,25 +40,23 @@ impl BenchmarkSuite {
 
     pub async fn run(&self) -> Result<Vec<BenchmarkReport>> {
         let run_prefix = format!("{}/{}", self.prefix, run_id());
-        let source_path = format!("{run_prefix}/read-source");
-
-        eprintln!("preparing 512 MiB source object {source_path:?}...");
-        upload_object(
-            &self.operator,
-            &source_path,
-            &Arc::new(Semaphore::new(self.config.write_concurrency)),
-            &self.full_part,
-            &self.final_part,
-            /*deadline=*/ None,
-        )
-        .await
-        .context("failed to prepare read/stat source object")?;
+        let source_paths = (0..self.config.read_concurrency)
+            .map(|index| format!("{run_prefix}/read-sources/object-{index}"))
+            .collect::<Vec<_>>();
 
         eprintln!(
-            "running read workload for {}s at concurrency {}...",
-            self.config.read_duration_seconds, self.config.read_concurrency
+            "preparing {} source objects of 512 MiB each...",
+            source_paths.len()
         );
-        let read = self.run_read(&source_path).await?;
+        self.prepare_read_sources(&source_paths).await?;
+
+        eprintln!(
+            "running read workload for {}s at concurrency {} across {} objects...",
+            self.config.read_duration_seconds,
+            self.config.read_concurrency,
+            source_paths.len()
+        );
+        let read = self.run_read(source_paths.clone()).await?;
 
         eprintln!(
             "running write workload for {}s at concurrency {}...",
@@ -70,7 +68,7 @@ impl BenchmarkSuite {
             "running stat workload for {}s at concurrency {}...",
             self.config.stat_duration_seconds, self.config.stat_concurrency
         );
-        let stat = self.run_stat(&source_path).await?;
+        let stat = self.run_stat(&source_paths[0]).await?;
 
         if self.config.keep_objects {
             eprintln!("retaining benchmark objects under {run_prefix:?}");
@@ -84,9 +82,40 @@ impl BenchmarkSuite {
         Ok(vec![read, write, stat])
     }
 
-    async fn run_read(&self, path: &str) -> Result<BenchmarkReport> {
+    async fn prepare_read_sources(&self, paths: &[String]) -> Result<()> {
+        let part_writes = Arc::new(Semaphore::new(self.config.write_concurrency));
+        let mut uploads = JoinSet::new();
+
+        for path in paths {
+            let operator = self.operator.clone();
+            let path = path.clone();
+            let part_writes = Arc::clone(&part_writes);
+            let full_part = self.full_part.clone();
+            let final_part = self.final_part.clone();
+            uploads.spawn(async move {
+                upload_object(
+                    &operator,
+                    &path,
+                    &part_writes,
+                    &full_part,
+                    &final_part,
+                    /*deadline=*/ None,
+                )
+                .await
+                .with_context(|| format!("failed to prepare read source object {path:?}"))?;
+                Ok::<(), anyhow::Error>(())
+            });
+        }
+
+        while let Some(result) = uploads.join_next().await {
+            result.context("read source upload task failed")??;
+        }
+        Ok(())
+    }
+
+    async fn run_read(&self, paths: Vec<String>) -> Result<BenchmarkReport> {
         let recorder = Arc::new(MetricsRecorder::default());
-        let path = Arc::new(path.to_owned());
+        let paths = Arc::new(paths);
         let elapsed = Duration::from_secs(self.config.read_duration_seconds);
         let deadline = TokioInstant::now() + elapsed;
         let read_requests = Arc::new(Semaphore::new(self.config.read_concurrency));
@@ -95,11 +124,12 @@ impl BenchmarkSuite {
         for worker_id in 0..self.config.read_concurrency {
             let operator = self.operator.clone();
             let recorder = Arc::clone(&recorder);
-            let path = Arc::clone(&path);
+            let paths = Arc::clone(&paths);
             let read_requests = Arc::clone(&read_requests);
             let concurrency = self.config.read_concurrency as u64;
 
             workers.spawn(async move {
+                let path = &paths[worker_id % paths.len()];
                 let mut block = worker_id as u64;
                 loop {
                     let offset = (block % (OBJECT_SIZE / READ_SIZE)) * READ_SIZE;
@@ -116,7 +146,7 @@ impl BenchmarkSuite {
                     let operation_started = Instant::now();
                     let Some(result) = before_deadline(deadline, async {
                         operator
-                            .read_with(path.as_str())
+                            .read_with(path)
                             .range(offset..offset + READ_SIZE)
                             .await
                     })
@@ -289,15 +319,7 @@ async fn upload_object(
             return Ok(false);
         };
         let permit = permit.context("part-write semaphore closed")?;
-        let Some(result) = maybe_before_deadline(deadline, writer.write(full_part.clone())).await
-        else {
-            drop(permit);
-            writer
-                .abort()
-                .await
-                .with_context(|| format!("failed to abort timed-out upload for {path:?}"))?;
-            return Ok(false);
-        };
+        let result = writer.write(full_part.clone()).await;
         drop(permit);
         if let Err(error) = result {
             let _ = writer.abort().await;
@@ -316,15 +338,7 @@ async fn upload_object(
             return Ok(false);
         };
         let permit = permit.context("part-write semaphore closed")?;
-        let Some(result) = maybe_before_deadline(deadline, writer.write(final_part.clone())).await
-        else {
-            drop(permit);
-            writer
-                .abort()
-                .await
-                .with_context(|| format!("failed to abort timed-out upload for {path:?}"))?;
-            return Ok(false);
-        };
+        let result = writer.write(final_part.clone()).await;
         drop(permit);
         if let Err(error) = result {
             let _ = writer.abort().await;
@@ -332,13 +346,7 @@ async fn upload_object(
         }
     }
 
-    let Some(result) = maybe_before_deadline(deadline, writer.close()).await else {
-        writer
-            .abort()
-            .await
-            .with_context(|| format!("failed to abort timed-out upload for {path:?}"))?;
-        return Ok(false);
-    };
+    let result = writer.close().await;
     if let Err(error) = result {
         let _ = writer.abort().await;
         return Err(error)
