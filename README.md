@@ -74,7 +74,9 @@ The measured phases use:
 - Stat throughput: successful operations divided by measured wall time
 - Latency: HDR histogram mean, p50, p95, and p99 for successful reads,
   multipart part writes, and stat operations
-- Reliability: success rate and final error counts grouped by OpenDAL error kind
+- Reliability: success rates for measured read, part-write, and stat operations;
+  multipart start, completion, abort, and coordination failures are reported
+  separately as control errors
 
 The source-object preparation and final cleanup are outside measured phases.
 The configured duration is the request-start window: after its deadline, no
