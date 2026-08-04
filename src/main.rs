@@ -7,6 +7,9 @@ use object_storage_perf::{
     storage::Storage,
 };
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();

@@ -10,26 +10,25 @@ use std::{
 
 use hdrhistogram::Histogram;
 
+const MAX_LATENCY_NANOS: u64 = 60 * 60 * 1_000_000_000;
+
 #[derive(Debug)]
 pub struct BenchmarkReport {
     pub workload: &'static str,
     pub elapsed: Duration,
     pub successes: u64,
     pub errors: u64,
+    /// Total bytes transferred by successful operations; zero for stat workloads.
     pub bytes: u64,
-    pub mean_latency_nanos: f64,
-    pub p50_latency_nanos: u64,
-    pub p95_latency_nanos: u64,
-    pub p99_latency_nanos: u64,
+    pub mean_latency_ms: f64,
+    pub p50_latency_ms: f64,
+    pub p95_latency_ms: f64,
+    pub p99_latency_ms: f64,
     pub error_categories: Vec<(String, u64)>,
     pub first_error: Option<String>,
 }
 
 impl BenchmarkReport {
-    pub fn average_latency_ms(&self) -> f64 {
-        self.mean_latency_nanos / 1_000_000.0
-    }
-
     pub fn operations_per_second(&self) -> f64 {
         self.successes as f64 / self.elapsed.as_secs_f64()
     }
@@ -46,10 +45,6 @@ impl BenchmarkReport {
             self.successes as f64 / attempts as f64
         }
     }
-
-    fn percentile_latency_ms(&self, latency_nanos: u64) -> f64 {
-        latency_nanos as f64 / 1_000_000.0
-    }
 }
 
 impl fmt::Display for BenchmarkReport {
@@ -58,10 +53,10 @@ impl fmt::Display for BenchmarkReport {
             formatter,
             "{:<5} latency avg/p50/p95/p99: {:.3}/{:.3}/{:.3}/{:.3} ms | ",
             self.workload,
-            self.average_latency_ms(),
-            self.percentile_latency_ms(self.p50_latency_nanos),
-            self.percentile_latency_ms(self.p95_latency_nanos),
-            self.percentile_latency_ms(self.p99_latency_nanos),
+            self.mean_latency_ms,
+            self.p50_latency_ms,
+            self.p95_latency_ms,
+            self.p99_latency_ms,
         )?;
 
         if let Some(throughput) = self.throughput_mib_per_second() {
@@ -115,7 +110,10 @@ impl Default for MetricsRecorder {
             successes: AtomicU64::new(0),
             errors: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
-            latency: Mutex::new(Histogram::<u64>::new(3).expect("valid histogram precision")),
+            latency: Mutex::new(
+                Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_NANOS, 3)
+                    .expect("valid histogram bounds"),
+            ),
             error_categories: Mutex::new(BTreeMap::new()),
             first_error: Mutex::new(None),
         }
@@ -156,10 +154,10 @@ impl MetricsRecorder {
             successes: self.successes.load(Ordering::SeqCst),
             errors: self.errors.load(Ordering::SeqCst),
             bytes: self.bytes.load(Ordering::SeqCst),
-            mean_latency_nanos: latency.mean(),
-            p50_latency_nanos: latency.value_at_quantile(0.50),
-            p95_latency_nanos: latency.value_at_quantile(0.95),
-            p99_latency_nanos: latency.value_at_quantile(0.99),
+            mean_latency_ms: nanos_to_millis(latency.mean()),
+            p50_latency_ms: nanos_to_millis(latency.value_at_quantile(0.50) as f64),
+            p95_latency_ms: nanos_to_millis(latency.value_at_quantile(0.95) as f64),
+            p99_latency_ms: nanos_to_millis(latency.value_at_quantile(0.99) as f64),
             error_categories: self
                 .error_categories
                 .lock()
@@ -174,6 +172,10 @@ impl MetricsRecorder {
 
 fn duration_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u64::MAX as u128) as u64
+}
+
+fn nanos_to_millis(nanos: f64) -> f64 {
+    nanos / 1_000_000.0
 }
 
 fn error_category(error: &anyhow::Error) -> String {

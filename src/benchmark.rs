@@ -13,7 +13,7 @@ mod write;
 
 pub const MIB: u64 = 1024 * 1024;
 pub const OBJECT_SIZE: u64 = 512 * MIB;
-pub const READ_SIZE: u64 = 2 * MIB;
+pub const READ_SIZE: u64 = 10 * MIB;
 pub const MULTIPART_PART_SIZE: u64 = 10 * MIB;
 
 pub struct BenchmarkSuite {
