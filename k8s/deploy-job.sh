@@ -18,6 +18,7 @@ timeout_seconds="${OSP_TIMEOUT_SECONDS:-30}"
 io_timeout_seconds="${OSP_IO_TIMEOUT_SECONDS:-30}"
 namespace="${NAMESPACE:-default}"
 image_pull_secret="${IMAGE_PULL_SECRET:-ocir-secret}"
+node_type="${NODE_TYPE:-BM.GPU.B4.8}"
 manifest="$(mktemp)"
 trap 'rm -f "$manifest"' EXIT
 
@@ -48,6 +49,7 @@ sed \
   -e "s|__NAMESPACE__|$(escape_sed "$namespace")|g" \
   -e "s|__BENCHMARK_IMAGE__|$(escape_sed "$image")|g" \
   -e "s|__IMAGE_PULL_SECRET__|$(escape_sed "$image_pull_secret")|g" \
+  -e "s|__NODE_TYPE__|$(escape_sed "$node_type")|g" \
   -e "s|__OSP_ENDPOINT__|$(escape_sed "$endpoint")|g" \
   -e "s|__OSP_BUCKET__|$(escape_sed "$bucket")|g" \
   -e "s|__OSP_REGION__|$(escape_sed "$region")|g" \

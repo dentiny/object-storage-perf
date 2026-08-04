@@ -43,7 +43,9 @@ cargo run --release -- \
   --stat-duration-seconds 30
 ```
 
-`--read-concurrency` limits range reads currently in progress.
+`--read-concurrency` limits range reads currently in progress. The suite
+prepares one source object per read worker and distributes reads across all of
+them to avoid measuring a single hot object's limit.
 `--write-concurrency` is one global limit across multipart part writes; it is
 not multiplied by the number of object uploads. `--stat-concurrency` limits
 stat requests.
@@ -53,11 +55,12 @@ Control-operation and per-I/O-attempt timeouts default to 30 seconds. Configure
 them with `OSP_RETRY_MAX_TIMES`, `OSP_TIMEOUT_SECONDS`, and
 `OSP_IO_TIMEOUT_SECONDS`.
 
-Every write operation uses a new object path. The suite also creates one
-512 MiB source object for read and stat. It attempts to delete all created
-objects after reporting; use `--keep-objects` to retain them. Credentials
-without delete permission can still run the benchmark, but cleanup will emit a
-warning.
+Every write operation uses a new object path. Outside the measured phase, the
+suite also creates one 512 MiB source object per read worker and spreads reads
+across all of them. Stat uses one of those objects. It attempts to delete all
+created objects after reporting; use `--keep-objects` to retain them.
+Credentials without delete permission can still run the benchmark, but cleanup
+will emit a warning.
 
 The measured phases use:
 
@@ -73,8 +76,9 @@ The measured phases use:
 
 The source-object preparation and final cleanup are outside measured phases.
 At the duration deadline, in-flight reads and stat requests are canceled and
-in-progress multipart writes are aborted. Multipart abort and final cleanup can
-add a small amount of wall time after measurement stops. Use
+no new multipart parts begin. An in-flight part finishes before its valid
+writer is aborted, so multipart abort and final cleanup can add a small amount
+of wall time after measurement stops. Use
 `cargo run -- --help` for all flags and environment variables.
 
 ## Run on OKE
