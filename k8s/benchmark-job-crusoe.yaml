@@ -1,0 +1,79 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: object-storage-perf
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: object-storage-perf
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: object-storage-perf
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: amd64
+        kubernetes.io/hostname: __NODE_NAME__
+      imagePullSecrets:
+        - name: __IMAGE_PULL_SECRET__
+      containers:
+        - name: benchmark
+          image: __BENCHMARK_IMAGE__
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TOKIO_WORKER_THREADS
+              value: "__TOKIO_WORKER_THREADS__"
+            - name: OSP_ENDPOINT
+              value: __OSP_ENDPOINT__
+            - name: OSP_BUCKET
+              value: __OSP_BUCKET__
+            - name: OSP_REGION
+              value: __OSP_REGION__
+            - name: OSP_PREFIX
+              value: __OSP_PREFIX__
+            - name: OSP_READ_DURATION
+              value: "__OSP_READ_DURATION__"
+            - name: OSP_WRITE_DURATION
+              value: "__OSP_WRITE_DURATION__"
+            - name: OSP_STAT_DURATION
+              value: "__OSP_STAT_DURATION__"
+            - name: OSP_READ_CONCURRENCY
+              value: "__OSP_READ_CONCURRENCY__"
+            - name: OSP_WRITE_CONCURRENCY
+              value: "__OSP_WRITE_CONCURRENCY__"
+            - name: OSP_STAT_CONCURRENCY
+              value: "__OSP_STAT_CONCURRENCY__"
+            - name: OSP_RETRY_MAX_TIMES
+              value: "__OSP_RETRY_MAX_TIMES__"
+            - name: OSP_TIMEOUT_SECONDS
+              value: "__OSP_TIMEOUT_SECONDS__"
+            - name: OSP_IO_TIMEOUT_SECONDS
+              value: "__OSP_IO_TIMEOUT_SECONDS__"
+            - name: OSP_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: object-storage-perf-s3
+                  key: access-key-id
+            - name: OSP_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: object-storage-perf-s3
+                  key: secret-access-key
+          resources:
+            requests:
+              cpu: "__CPU_REQUEST__"
+              memory: 8Gi
+            limits:
+              cpu: "__CPU_LIMIT__"
+              memory: 8Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop:
+                - ALL

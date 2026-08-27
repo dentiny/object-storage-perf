@@ -5,6 +5,9 @@ S3-compatible object storage. It runs 10 MiB range reads, 512 MiB multipart
 writes, and object stat requests, then prints a rough latency and throughput
 report.
 
+See [Performance investigation](PERFORMANCE.md) for the bottlenecks found during
+profiling, the fixes, and the final Crusoe scaling results.
+
 ## Configuration
 
 Set the connection through environment variables:
@@ -86,10 +89,11 @@ completed in-flight operation. Multipart completion, abort, and final cleanup
 are excluded from that time. Use
 `cargo run -- --help` for all flags and environment variables.
 
-## Run on OKE
+## Build the container image
 
-OKE workers are Linux/AMD64. On an Apple Silicon workstation, cross-compile a
-static AMD64 binary locally with Zig, then let Docker package only that binary.
+Crusoe and OKE workers are Linux/AMD64. On an Apple Silicon workstation,
+cross-compile a static AMD64 binary locally with Zig, then let Docker package
+only that binary.
 The benchmark uses jemalloc to avoid allocator-induced `mmap` contention while
 processing many network buffers concurrently:
 
@@ -118,8 +122,7 @@ docker run --rm --platform linux/amd64 \
   object-storage-perf:local-amd64 --help
 ```
 
-Create the benchmark credential Secret out of band. The access key and secret
-must be an OCI Customer Secret Key when using Oracle's S3-compatible endpoint:
+Create the benchmark credential Secret out of band in each target cluster:
 
 ```console
 kubectl -n default create secret generic object-storage-perf-s3 \
@@ -127,33 +130,53 @@ kubectl -n default create secret generic object-storage-perf-s3 \
   --from-literal=secret-access-key="$OSP_SECRET_ACCESS_KEY"
 ```
 
-The Job expects an OCIR pull Secret named `ocir-secret` and a dedicated
-benchmark node. Label and taint that node so ordinary workloads cannot schedule
-there:
+The Job expects an image pull Secret named `ocir-secret` by default. Override
+it with `IMAGE_PULL_SECRET`.
+
+## Run on Crusoe
+
+The Crusoe deployment defaults to context `hark-norway-gpu`, the private
+`hjiang-test-bucket`, and the Object Storage endpoint in `eu-norway1-a`. The
+endpoint is reachable only from Crusoe compute in that location. Pinning the
+Job to one worker keeps performance comparisons reproducible:
 
 ```console
-kubectl label node <node-name> object-storage-perf/dedicated=true
-kubectl taint node <node-name> object-storage-perf/dedicated=true:NoSchedule
+BENCHMARK_IMAGE=phx.ocir.io/axnzj5nsewcd/object-storage-perf:benchmark-001 \
+NODE_NAME=np-b69a6ebc-3.eu-norway1-a.compute.internal \
+CPU_LIMIT=64 \
+TOKIO_WORKER_THREADS=64 \
+bash k8s/deploy-crusoe-job.sh
+
+kubectl --context hark-norway-gpu -n default logs -f job/object-storage-perf
 ```
 
-System DaemonSets remain on the node. Deploy the immutable image and follow its
-report:
+Override `KUBE_CONTEXT`, `OSP_ENDPOINT`, `OSP_BUCKET`, or `OSP_REGION` when
+targeting a different Crusoe cluster or location. Use a dedicated Crusoe Object
+Storage API key in `object-storage-perf-s3`.
+
+## Run on OCI
+
+The OCI deployment defaults to context `oke-phx-gpu`, region `us-phoenix-1`,
+and node type `BM.GPU.B4.8`. Supply the S3-compatible endpoint and bucket:
 
 ```console
 BENCHMARK_IMAGE=phx.ocir.io/axnzj5nsewcd/object-storage-perf:benchmark-001 \
 OSP_ENDPOINT=https://axnzj5nsewcd.compat.objectstorage.us-phoenix-1.oraclecloud.com \
 OSP_BUCKET=my-benchmark-bucket \
-OSP_REGION=us-phoenix-1 \
 OSP_READ_DURATION=120 \
 OSP_WRITE_DURATION=120 \
 OSP_STAT_DURATION=30 \
 OSP_READ_CONCURRENCY=64 \
 OSP_WRITE_CONCURRENCY=128 \
 OSP_STAT_CONCURRENCY=24 \
-bash k8s/deploy-job.sh
+bash k8s/deploy-oci-job.sh
 
-kubectl -n default logs -f job/object-storage-perf
+kubectl --context oke-phx-gpu -n default logs -f job/object-storage-perf
 ```
 
-Use `NAMESPACE` or `IMAGE_PULL_SECRET` to override the Kubernetes defaults.
-Neither the image build nor the Kubernetes Job compiles Rust.
+OCI requires a Customer Secret Key in `object-storage-perf-s3`. The selected
+node must have the `object-storage-perf/dedicated=true` label and matching
+`NoSchedule` taint. Override `NODE_TYPE` when using another OKE worker shape.
+
+Both deployment scripts accept the same workload, resource, namespace, and
+image-pull overrides. Neither script compiles Rust.
