@@ -7,6 +7,6 @@ edition = "2024"
 anyhow = "1.0.104"
 clap = { version = "4.6.5", features = ["derive", "env"] }
 hdrhistogram = { version = "7.6.0", default-features = false }
-opendal = { version = "0.58.1", features = ["layers-retry", "layers-timeout", "services-s3"] }
+opendal = { git = "https://github.com/apache/opendal.git", rev = "10eeb93244bb5f5cb709c562e5a69bbd7ea5eacc", features = ["layers-retry", "layers-timeout", "services-s3"] }
 tikv-jemallocator = { version = "0.7.0", default-features = false }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }

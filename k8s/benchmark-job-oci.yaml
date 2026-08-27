@@ -34,7 +34,7 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - name: TOKIO_WORKER_THREADS
-              value: "64"
+              value: "__TOKIO_WORKER_THREADS__"
             - name: OSP_ENDPOINT
               value: __OSP_ENDPOINT__
             - name: OSP_BUCKET
@@ -73,10 +73,10 @@ spec:
                   key: secret-access-key
           resources:
             requests:
-              cpu: "64"
+              cpu: "__CPU_REQUEST__"
               memory: 8Gi
             limits:
-              cpu: "64"
+              cpu: "__CPU_LIMIT__"
               memory: 8Gi
           securityContext:
             allowPrivilegeEscalation: false
